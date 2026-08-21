@@ -10,6 +10,7 @@ ReferenceKind = Literal[
     "person",
     "company",
     "company_urn",
+    "mutual_connections",
     "job",
     "feed_post",
     "article",
@@ -97,6 +98,9 @@ _REFERENCE_CAPS = {
     "posts": 12,
     "jobs": 8,
     "search_results": 15,
+    # A well-connected target can share hundreds of connections, and the point
+    # of the tool is enumeration, so this is deliberately far above the default.
+    "mutual_connections": 100,
     "job_posting": 8,
     "contact_info": 8,
     "inbox": 30,
@@ -135,6 +139,11 @@ _MAX_REDIRECT_UNWRAP_DEPTH = 5
 # and ``[1115,2573558]`` (also valid JSON). Optional surrounding quote keeps
 # the matcher resilient if LinkedIn ever drops the string-typing.
 _FIRST_URN_RE = re.compile(r'\[\s*"?(\d+)"?')
+# Member ids are opaque and alphanumeric (``ACoAA...``), unlike the purely
+# numeric company urn above, so they need their own pattern. Matched anywhere in
+# a value because the facet is read positionally rather than by name -- see
+# ``_first_member_urn_from_query``.
+_MEMBER_URN_RE = re.compile(r"(ACoAA[A-Za-z0-9_-]+)")
 
 
 def _first_company_urn_from_query(query: str) -> str | None:
@@ -150,6 +159,23 @@ def _first_company_urn_from_query(query: str) -> str | None:
         return None
     match = _FIRST_URN_RE.match(values[0])
     return match.group(1) if match else None
+
+
+def _first_member_urn_from_query(query: str) -> str | None:
+    """Pull the first member id out of a people-search facet, by shape not name.
+
+    A "N mutual connections" anchor points at a people search filtered to one
+    person, e.g. ``connectionOf=["ACoAA..."]``. LinkedIn has shipped more than
+    one spelling of that facet over time (``connectionOf``,
+    ``facetConnectionOf``), and the exact one in play varies by surface, so
+    every value is scanned for the member-id shape instead of trusting a
+    parameter name. Company facets are numeric and cannot match.
+    """
+    for values in parse_qs(query).values():
+        for value in values:
+            if match := _MEMBER_URN_RE.search(value):
+                return match.group(1)
+    return None
 
 
 def build_references(
@@ -195,6 +221,7 @@ def normalize_reference(
         "external",
         "conversation",
         "company_urn",
+        "mutual_connections",
     }:
         return None
 
@@ -213,6 +240,10 @@ def normalize_reference(
         urn_id = _first_company_urn_from_query(urlparse(normalized_url).query)
         if urn_id:
             reference["value"] = urn_id
+    elif kind == "mutual_connections":
+        member_id = _first_member_urn_from_query(urlparse(normalized_url).query)
+        if member_id:
+            reference["value"] = member_id
     if text:
         reference["text"] = text
     if context:
@@ -271,6 +302,14 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
                 "company_urn",
                 f"/search/results/people/?currentCompany=%5B%22{urn_id}%22%5D",
             )
+        # The "N mutual connections" anchor is the same class of rescued
+        # canned-search link, filtered to a person instead of a company. The
+        # query is carried through verbatim rather than rebuilt: LinkedIn
+        # supplies a working url, and reconstructing it would bake in a facet
+        # spelling that is not stable across surfaces.
+        member_id = _first_member_urn_from_query(parsed.query)
+        if member_id:
+            return ("mutual_connections", f"/search/results/people/?{parsed.query}")
 
     if _is_linkedin_chrome(path):
         return None

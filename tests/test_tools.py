@@ -30,6 +30,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
+    mock.get_mutual_connections = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
     mock.get_conversation = AsyncMock(return_value=scrape_result)
     mock.search_conversations = AsyncMock(return_value=scrape_result)
@@ -764,6 +765,113 @@ class TestGetSidebarProfilesTool:
             await tool_fn("test-user", mock_context, extractor=mock_extractor)
 
 
+class TestGetMutualConnectionsTool:
+    async def test_get_mutual_connections_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/search/results/people/?connectionOf=%5B%22ACoAAB%22%5D",
+            "sections": {"mutual_connections": "Ryan Mahdavi\nJane Doe"},
+            "references": {
+                "mutual_connections": [
+                    {
+                        "kind": "person",
+                        "url": "/in/ryanmahdavi/",
+                        "text": "Ryan Mahdavi",
+                    }
+                ]
+            },
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_mutual_connections")
+        result = await tool_fn(
+            linkedin_username="test-user", ctx=mock_context, extractor=mock_extractor
+        )
+
+        assert result["sections"]["mutual_connections"].startswith("Ryan")
+        assert (
+            result["references"]["mutual_connections"][0]["url"] == "/in/ryanmahdavi/"
+        )
+        mock_extractor.get_mutual_connections.assert_awaited_once_with(
+            "test-user", keywords=None, max_scrolls=5
+        )
+
+    async def test_get_mutual_connections_passes_filters(self, mock_context):
+        mock_extractor = _make_mock_extractor({"url": "u", "sections": {}})
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_mutual_connections")
+        await tool_fn(
+            linkedin_username="test-user",
+            ctx=mock_context,
+            keywords="recruiter",
+            max_scrolls=10,
+            extractor=mock_extractor,
+        )
+
+        mock_extractor.get_mutual_connections.assert_awaited_once_with(
+            "test-user", keywords="recruiter", max_scrolls=10
+        )
+
+    async def test_get_mutual_connections_no_link_is_not_an_error(self, mock_context):
+        """A profile without the anchor must report why, not return a bare search."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "sections": {},
+            "section_errors": {
+                "mutual_connections": {
+                    "error_type": "no_mutual_connections_link",
+                    "message": "No mutual-connections link on this profile.",
+                }
+            },
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_mutual_connections")
+        result = await tool_fn(
+            linkedin_username="test-user", ctx=mock_context, extractor=mock_extractor
+        )
+
+        assert result["sections"] == {}
+        assert (
+            result["section_errors"]["mutual_connections"]["error_type"]
+            == "no_mutual_connections_link"
+        )
+
+    async def test_get_mutual_connections_error(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        mock_extractor = MagicMock()
+        mock_extractor.get_mutual_connections = AsyncMock(
+            side_effect=SessionExpiredError()
+        )
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_mutual_connections")
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(
+                linkedin_username="test-user",
+                ctx=mock_context,
+                extractor=mock_extractor,
+            )
+
+
 class TestMessagingTools:
     async def test_get_inbox_success(self, mock_context):
         expected = {
@@ -1301,6 +1409,7 @@ class TestToolTimeouts:
             "get_person_profile",
             "connect_with_person",
             "get_sidebar_profiles",
+            "get_mutual_connections",
             "search_people",
             "get_company_profile",
             "get_company_posts",
@@ -1332,6 +1441,7 @@ class TestToolTimeouts:
             "get_my_profile",
             "connect_with_person",
             "get_sidebar_profiles",
+            "get_mutual_connections",
             "search_people",
             "get_company_profile",
             "get_company_posts",

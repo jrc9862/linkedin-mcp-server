@@ -308,6 +308,72 @@ def register_person_tools(
 
     @mcp.tool(
         timeout=tool_timeout,
+        title="Get Mutual Connections",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_mutual_connections(
+        linkedin_username: str,
+        ctx: Context,
+        keywords: str | None = None,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] = 5,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List the connections you share with a person -- who you both know.
+
+        Answers "who could introduce me to this person", which the company-based
+        filters cannot: search_people needs a company URN, so it only finds warm
+        paths at an employer you already identified. This works from the person.
+
+        LinkedIn shows this for 2nd-degree connections. A 1st-degree contact, an
+        out-of-network profile, or your own profile has no such link, and the
+        result comes back empty with a ``no_mutual_connections_link`` section
+        error rather than an unfiltered people search.
+
+        Costs two page loads, so prefer it for named targets over sweeping a list.
+
+        Args:
+            linkedin_username: LinkedIn username of the person; a full profile URL is accepted too
+                (e.g., "stickerdaniel", "williamhgates")
+            ctx: FastMCP context for progress reporting
+            keywords: Optional filter over the shared connections, by name, title or skill
+                (e.g., "recruiter", "engineer")
+            max_scrolls: How far to scroll the results page (1-50, default 5)
+
+        Returns:
+            Dict with url, sections {mutual_connections: raw text}, references
+            (/in/ paths for the shared connections) and optional section_errors.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_mutual_connections"
+            )
+            logger.info("Getting mutual connections for: %s", linkedin_username)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Extracting mutual connections"
+            )
+
+            result = await extractor.get_mutual_connections(
+                linkedin_username, keywords=keywords, max_scrolls=max_scrolls
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_mutual_connections")
+        except Exception as e:
+            raise_tool_error(e, "get_mutual_connections")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
         title="Get My Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},

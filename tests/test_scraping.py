@@ -3274,6 +3274,143 @@ class TestBuildContentSearchUrl:
 
 
 @pytest.mark.asyncio
+class TestGetMutualConnections:
+    """The anchor is found by url shape and followed verbatim, never rebuilt."""
+
+    URN = "ACoAAACdv4oBxLd4BoRvEgjbcgH9gzMmxwcyvWU"
+    HREF = (
+        "https://www.linkedin.com/search/results/people/"
+        "?connectionOf=%5B%22ACoAAACdv4oBxLd4BoRvEgjbcgH9gzMmxwcyvWU%22%5D"
+        "&network=%5B%22F%22%5D"
+    )
+
+    async def test_follows_the_captured_href_verbatim(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[self.HREF])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Ryan Mahdavi"),
+            ) as mock_extract,
+        ):
+            result = await extractor.get_mutual_connections("tomburwell")
+
+        await_args = mock_extract.await_args
+        assert await_args is not None
+        called_url = await_args.args[0]
+        assert called_url == self.HREF, "the href must not be reconstructed"
+        assert result["sections"]["mutual_connections"] == "Ryan Mahdavi"
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="mutual_connections", max_scrolls=5
+        )
+
+    async def test_relative_href_is_resolved(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        relative = f"/search/results/people/?connectionOf=%5B%22{self.URN}%22%5D"
+        mock_page.evaluate = AsyncMock(return_value=[relative])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("someone"),
+            ) as mock_extract,
+        ):
+            await extractor.get_mutual_connections("tomburwell")
+
+        await_args = mock_extract.await_args
+        assert await_args is not None
+        assert await_args.args[0].startswith("https://www.linkedin.com/")
+
+    async def test_ignores_people_searches_that_do_not_filter_by_person(
+        self, mock_page
+    ):
+        """A company canned-search on the page must not be mistaken for it."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                "https://www.linkedin.com/search/results/people/"
+                "?currentCompany=%5B%2274126343%22%5D",
+                "https://www.linkedin.com/search/results/people/?keywords=engineer",
+            ]
+        )
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock
+            ) as mock_extract,
+        ):
+            result = await extractor.get_mutual_connections("tomburwell")
+
+        mock_extract.assert_not_called()
+        assert result["sections"] == {}
+        assert (
+            result["section_errors"]["mutual_connections"]["error_type"]
+            == "no_mutual_connections_link"
+        )
+
+    async def test_no_anchor_reports_why_instead_of_searching(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock
+            ) as mock_extract,
+        ):
+            result = await extractor.get_mutual_connections("tomburwell")
+
+        mock_extract.assert_not_called()
+        assert result["url"].endswith("/in/tomburwell/")
+        assert (
+            result["section_errors"]["mutual_connections"]["error_type"]
+            == "no_mutual_connections_link"
+        )
+
+    async def test_keywords_are_appended_to_the_captured_href(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[self.HREF])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("x"),
+            ) as mock_extract,
+        ):
+            await extractor.get_mutual_connections("tomburwell", keywords="recruiter")
+
+        await_args = mock_extract.await_args
+        assert await_args is not None
+        called_url = await_args.args[0]
+        assert called_url.startswith(self.HREF)
+        assert "keywords=recruiter" in called_url
+
+    async def test_rate_limit_is_reported(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[self.HREF])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted(_RATE_LIMITED_MSG),
+            ),
+        ):
+            result = await extractor.get_mutual_connections("tomburwell")
+
+        assert result["sections"] == {}
+        assert (
+            result["section_errors"]["mutual_connections"]["error_type"] == "rate_limit"
+        )
+
+
 class TestSearchPosts:
     async def test_returns_results_and_url(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -6212,6 +6349,7 @@ class TestEveryNormalizedEntryPoint:
             ("scrape_person", ("../../feed", {"main_profile"}), {}),
             ("connect_with_person", ("../../feed",), {}),
             ("get_sidebar_profiles", ("../../feed",), {}),
+            ("get_mutual_connections", ("../../feed",), {}),
             ("_open_conversation_by_username", ("../../feed",), {}),
             ("send_message", ("../../feed", "hi"), {"confirm_send": False}),
             ("scrape_company", ("../../feed", {"about"}), {}),

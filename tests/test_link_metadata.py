@@ -618,6 +618,79 @@ class TestBuildReferences:
             }
         ]
 
+    def test_mutual_connections_anchor_is_rescued(self):
+        """The "N mutual connections" link survives the chrome filter."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?connectionOf=%5B%22ACoAAACdv4oBxLd4BoRvEgjbcgH9gzMmxwcyvWU%22%5D"
+                    "&network=%5B%22F%22%5D",
+                    "text": "Ryan is a mutual connection",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == [
+            {
+                "kind": "mutual_connections",
+                "url": "/search/results/people/"
+                "?connectionOf=%5B%22ACoAAACdv4oBxLd4BoRvEgjbcgH9gzMmxwcyvWU%22%5D"
+                "&network=%5B%22F%22%5D",
+                "value": "ACoAAACdv4oBxLd4BoRvEgjbcgH9gzMmxwcyvWU",
+                "text": "Ryan is a mutual connection",
+                "context": "top card",
+            }
+        ]
+
+    def test_mutual_connections_facet_name_is_not_hardcoded(self):
+        """LinkedIn has shipped more than one spelling; match on id shape."""
+        for facet in ("connectionOf", "facetConnectionOf"):
+            references = build_references(
+                [
+                    {
+                        "href": "https://www.linkedin.com/search/results/people/"
+                        f"?{facet}=%5B%22ACoAAB1234%22%5D",
+                        "text": "3 mutual connections",
+                    }
+                ],
+                "main_profile",
+            )
+            assert references[0]["kind"] == "mutual_connections", facet
+            assert references[0]["value"] == "ACoAAB1234", facet
+
+    def test_mutual_connections_survives_a_localized_label(self):
+        """The label is locale-dependent, so it must never gate the reference."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?connectionOf=%5B%22ACoAAB1234%22%5D",
+                    "text": "",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references[0]["kind"] == "mutual_connections"
+        assert references[0]["value"] == "ACoAAB1234"
+
+    def test_people_search_without_a_member_id_is_still_dropped(self):
+        """Only person-filtered searches are rescued; generic ones stay chrome."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?keywords=engineer",
+                    "text": "See all",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == []
+
     def test_company_urn_multi_id_anchor_uses_first_id(self):
         """SAP-style: parent + subsidiaries; the first id is the parent company."""
         references = build_references(

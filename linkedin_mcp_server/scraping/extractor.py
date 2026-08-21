@@ -47,6 +47,7 @@ from linkedin_mcp_server.scraping.identifiers import (
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
     build_references,
+    classify_link,
     dedupe_references,
 )
 
@@ -2529,6 +2530,110 @@ class LinkedInExtractor:
             "url": url,
             "sidebar_profiles": sidebar_profiles,
         }
+
+    async def get_mutual_connections(
+        self,
+        username: str,
+        keywords: str | None = None,
+        max_scrolls: int = 5,
+    ) -> dict[str, Any]:
+        """List the connections shared with a person, from their profile page.
+
+        Two navigations: the profile, to find the mutual-connections anchor,
+        then the people search that anchor points at.
+
+        The anchor is located by url shape rather than by its label, which is
+        localized ("Ryan is a mutual connection", "... gemeinsame Kontakte").
+        Its href is then followed verbatim instead of rebuilt, because
+        LinkedIn's facet spelling for this filter has not been stable and a
+        wrong facet name does not error -- it silently returns an unfiltered
+        people search, which reads exactly like a real result.
+
+        Returns:
+            Dict with url, sections {mutual_connections: text}, references, and
+            section_errors. A profile with no such anchor -- 1st degree, 3rd
+            degree, or your own -- yields an empty result plus a
+            ``no_mutual_connections_link`` section error, never a bare search.
+        """
+        username = normalize_person_identifier(username)
+        profile_url = person_profile_url(username, "/")
+
+        await self._navigate_to_page(profile_url)
+        await detect_rate_limit(self._page)
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", profile_url)
+        await handle_modal_close(self._page)
+
+        # Every people-search anchor inside <main>; the classifier below decides
+        # which one filters by a person. Scoped to main so the global nav's own
+        # search links cannot match.
+        hrefs: list[str] = await self._page.evaluate(
+            """() => {
+                const scope = document.querySelector('main');
+                if (!scope) return [];
+                return Array.from(
+                    scope.querySelectorAll('a[href*="/search/results/people"]')
+                ).map((a) => a.getAttribute('href') || a.href || '').filter(Boolean);
+            }"""
+        )
+
+        search_href: str | None = None
+        for href in hrefs:
+            absolute = urljoin("https://www.linkedin.com", href)
+            classified = classify_link(absolute)
+            if classified and classified[0] == "mutual_connections":
+                search_href = absolute
+                break
+
+        if search_href is None:
+            logger.info("No mutual-connections anchor on %s", profile_url)
+            return {
+                "url": profile_url,
+                "sections": {},
+                "section_errors": {
+                    "mutual_connections": {
+                        "error_type": "no_mutual_connections_link",
+                        "message": (
+                            "No mutual-connections link on this profile. LinkedIn "
+                            "shows one for 2nd-degree connections; 1st-degree "
+                            "profiles, out-of-network profiles and your own do not "
+                            "have one."
+                        ),
+                    }
+                },
+            }
+
+        if keywords:
+            separator = "&" if urlparse(search_href).query else "?"
+            search_href = f"{search_href}{separator}keywords={quote_plus(keywords)}"
+
+        await asyncio.sleep(_NAV_DELAY)
+        extracted = await self.extract_page(
+            search_href,
+            section_name="mutual_connections",
+            max_scrolls=max_scrolls,
+        )
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["mutual_connections"] = extracted.text
+            if extracted.references:
+                references["mutual_connections"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["mutual_connections"] = rate_limited_section_error()
+        elif extracted.error:
+            section_errors["mutual_connections"] = extracted.error
+
+        result: dict[str, Any] = {"url": search_href, "sections": sections}
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
 
     async def _resolve_message_compose_href(self) -> str | None:
         """Return the direct recipient-specific compose URL from a profile page."""

@@ -64,6 +64,10 @@
       "description": "Extract profile URLs from LinkedIn sidebar recommendation sections on a profile page"
     },
     {
+      "name": "get_mutual_connections",
+      "description": "List the connections you share with a person (2nd-degree profiles), for finding a warm introduction path"
+    },
+    {
       "name": "get_company_profile",
       "description": "Extract comprehensive company information and details. About-section references may include a company_urn entry carrying the numeric id LinkedIn's people-search uses in its currentCompany URL facet."
     },
