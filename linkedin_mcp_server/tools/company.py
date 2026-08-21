@@ -50,8 +50,15 @@ def register_company_tools(
         """
         Get a specific company's LinkedIn profile.
 
+        company_name must be the exact LinkedIn URL slug (the path segment after
+        /company/), not the display name. LinkedIn assigns unique slugs and the
+        display name often does not match. For example, the AI lab Anthropic
+        lives at /company/anthropicresearch/, not /company/anthropic/, which is
+        an unrelated company. If you are unsure of the slug, call
+        search_companies first and pick the slug from the returned references.
+
         Args:
-            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
+            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The about page is always included.
@@ -117,8 +124,12 @@ def register_company_tools(
         """
         Get recent posts from a company's LinkedIn feed.
 
+        company_name must be the exact LinkedIn URL slug, not the display name —
+        see get_company_profile. A wrong slug returns a different company's posts
+        without raising an error.
+
         Args:
-            company_name: LinkedIn company name (e.g., "docker", "anthropic", "microsoft"). A full company URL is accepted too and is reduced to the slug.
+            company_name: LinkedIn company URL slug (e.g., "docker", "anthropicresearch", "microsoft"). A full company URL is accepted too and is reduced to the slug.
             ctx: FastMCP context for progress reporting
 
         Returns:
