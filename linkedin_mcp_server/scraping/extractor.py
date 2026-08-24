@@ -2542,12 +2542,17 @@ class LinkedInExtractor:
         Two navigations: the profile, to find the mutual-connections anchor,
         then the people search that anchor points at.
 
-        The anchor is located by url shape rather than by its label, which is
-        localized ("Ryan is a mutual connection", "... gemeinsame Kontakte").
-        Its href is then followed verbatim instead of rebuilt, because
-        LinkedIn's facet spelling for this filter has not been stable and a
-        wrong facet name does not error -- it silently returns an unfiltered
-        people search, which reads exactly like a real result.
+        Where an anchor exists it is located by url shape rather than by its
+        label, which is localized ("Ryan is a mutual connection", "...
+        gemeinsame Kontakte"), and it is followed verbatim rather than rebuilt.
+        Profile top cards, however, render the phrase as plain text with no
+        link, so the canned search is reconstructed from the member urn the
+        profile already exposes, using the url shape LinkedIn emits on its own
+        search-result cards.
+
+        A wrong facet name does not error -- it silently returns an unfiltered
+        people search that reads exactly like a real result -- so a filter is
+        never assumed: no member urn means no search.
 
         Returns:
             Dict with url, sections {mutual_connections: text}, references, and
@@ -2566,16 +2571,31 @@ class LinkedInExtractor:
             logger.debug("No <main> element found on %s", profile_url)
         await handle_modal_close(self._page)
 
-        # Every people-search anchor inside <main>; the classifier below decides
-        # which one filters by a person. Scoped to main so the global nav's own
-        # search links cannot match.
+        # Every people-search anchor on the page; the classifier below decides
+        # which one filters by a person. <main> is searched first so a top-card
+        # link wins, then the rest of the document -- LinkedIn renders this
+        # canned search outside main on some surfaces, and scoping to main alone
+        # silently found nothing on real profiles. Widening is safe here because
+        # a match must still carry a member id, which no nav or footer link does.
         hrefs: list[str] = await self._page.evaluate(
             """() => {
-                const scope = document.querySelector('main');
-                if (!scope) return [];
-                return Array.from(
-                    scope.querySelectorAll('a[href*="/search/results/people"]')
-                ).map((a) => a.getAttribute('href') || a.href || '').filter(Boolean);
+                const seen = new Set();
+                const out = [];
+                const collect = (root) => {
+                    if (!root) return;
+                    for (const a of root.querySelectorAll(
+                        'a[href*="/search/results/people"]'
+                    )) {
+                        const href = a.getAttribute('href') || a.href || '';
+                        if (href && !seen.has(href)) {
+                            seen.add(href);
+                            out.push(href);
+                        }
+                    }
+                };
+                collect(document.querySelector('main'));
+                collect(document);
+                return out;
             }"""
         )
 
@@ -2586,6 +2606,27 @@ class LinkedInExtractor:
             if classified and classified[0] == "mutual_connections":
                 search_href = absolute
                 break
+
+        if search_href is None:
+            # Profile top cards render "A, B and N other mutual connections" as
+            # text, not as a link -- verified on real 2nd-degree profiles, where
+            # the phrase is present and no people-search anchor exists anywhere
+            # on the page. The anchor only appears on search-result cards.
+            #
+            # So fall back to the canned search LinkedIn itself emits there. The
+            # shape below was captured from a live result card rather than
+            # guessed, and the id it needs is the same member urn the profile
+            # already exposes -- confirmed identical for the same person via
+            # both routes.
+            member_urn = await self._extract_profile_urn()
+            if member_urn:
+                search_href = (
+                    "https://www.linkedin.com/search/results/people/"
+                    "?origin=SHARED_CONNECTIONS_CANNED_SEARCH"
+                    f"&network={_encode_list_facet(['F'])}"
+                    f"&connectionOf={_encode_list_facet([member_urn])}"
+                )
+                logger.info("Built shared-connections search for %s", profile_url)
 
         if search_href is None:
             logger.info("No mutual-connections anchor on %s", profile_url)

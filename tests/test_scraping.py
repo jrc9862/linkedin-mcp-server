@@ -3341,6 +3341,12 @@ class TestGetMutualConnections:
         with (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
+                extractor,
+                "_extract_profile_urn",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
                 extractor, "extract_page", new_callable=AsyncMock
             ) as mock_extract,
         ):
@@ -3353,11 +3359,70 @@ class TestGetMutualConnections:
             == "no_mutual_connections_link"
         )
 
+    async def test_falls_back_to_the_member_urn_when_no_anchor_exists(self, mock_page):
+        """Profile top cards render the phrase as text, so rebuild the search."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_profile_urn",
+                new_callable=AsyncMock,
+                return_value=self.URN,
+            ),
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Raazi Imam"),
+            ) as mock_extract,
+        ):
+            result = await extractor.get_mutual_connections("alinalam-")
+
+        await_args = mock_extract.await_args
+        assert await_args is not None
+        called_url = await_args.args[0]
+        assert "connectionOf=%5B%22" + self.URN + "%22%5D" in called_url
+        assert "origin=SHARED_CONNECTIONS_CANNED_SEARCH" in called_url
+        assert "network=%5B%22F%22%5D" in called_url
+        assert result["sections"]["mutual_connections"] == "Raazi Imam"
+
+    async def test_no_anchor_and_no_urn_never_runs_a_bare_search(self, mock_page):
+        """Without a member id there is no filter, so there is no search."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_profile_urn",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch.object(
+                extractor, "extract_page", new_callable=AsyncMock
+            ) as mock_extract,
+        ):
+            result = await extractor.get_mutual_connections("someone")
+
+        mock_extract.assert_not_called()
+        assert (
+            result["section_errors"]["mutual_connections"]["error_type"]
+            == "no_mutual_connections_link"
+        )
+
     async def test_no_anchor_reports_why_instead_of_searching(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         mock_page.evaluate = AsyncMock(return_value=[])
         with (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_extract_profile_urn",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
             patch.object(
                 extractor, "extract_page", new_callable=AsyncMock
             ) as mock_extract,
