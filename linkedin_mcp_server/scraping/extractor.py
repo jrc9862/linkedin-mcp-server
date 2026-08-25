@@ -2554,11 +2554,15 @@ class LinkedInExtractor:
         people search that reads exactly like a real result -- so a filter is
         never assumed: no member urn means no search.
 
+        Works for 1st-degree contacts too -- you and a direct connection still
+        share connections, and LinkedIn returns them. Only your own profile has
+        nothing to compute.
+
         Returns:
             Dict with url, sections {mutual_connections: text}, references, and
-            section_errors. A profile with no such anchor -- 1st degree, 3rd
-            degree, or your own -- yields an empty result plus a
-            ``no_mutual_connections_link`` section error, never a bare search.
+            section_errors. When neither an anchor nor a member id can be found,
+            yields an empty result plus a ``no_mutual_connections_link`` section
+            error, never a bare search.
         """
         username = normalize_person_identifier(username)
         profile_url = person_profile_url(username, "/")
@@ -2637,10 +2641,13 @@ class LinkedInExtractor:
                     "mutual_connections": {
                         "error_type": "no_mutual_connections_link",
                         "message": (
-                            "No mutual-connections link on this profile. LinkedIn "
-                            "shows one for 2nd-degree connections; 1st-degree "
-                            "profiles, out-of-network profiles and your own do not "
-                            "have one."
+                            "Could not determine shared connections for this "
+                            "profile: no shared-connections link and no member id "
+                            "on the page. Expected on your own profile, which has "
+                            "nothing to share. Otherwise LinkedIn did not expose "
+                            "the member id here -- find the person through "
+                            "search_people instead, whose result cards carry the "
+                            "shared-connections link directly."
                         ),
                     }
                 },

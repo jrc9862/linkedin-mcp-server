@@ -327,10 +327,11 @@ def register_person_tools(
         filters cannot: search_people needs a company URN, so it only finds warm
         paths at an employer you already identified. This works from the person.
 
-        LinkedIn shows this for 2nd-degree connections. A 1st-degree contact, an
-        out-of-network profile, or your own profile has no such link, and the
-        result comes back empty with a ``no_mutual_connections_link`` section
-        error rather than an unfiltered people search.
+        Works for 1st- and 2nd-degree profiles alike -- you share connections
+        with a direct contact too. Your own profile has nothing to share, and
+        anywhere the member id cannot be read the result comes back empty with
+        a ``no_mutual_connections_link`` section error rather than a people
+        search filtered to the wrong thing.
 
         Costs two page loads, so prefer it for named targets over sweeping a list.
 
