@@ -3309,7 +3309,10 @@ class TestGetMutualConnections:
 
     async def test_relative_href_is_resolved(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        relative = f"/search/results/people/?connectionOf=%5B%22{self.URN}%22%5D"
+        relative = (
+            f"/search/results/people/?connectionOf=%5B%22{self.URN}%22%5D"
+            "&network=%5B%22F%22%5D"
+        )
         mock_page.evaluate = AsyncMock(return_value=[relative])
         with (
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),

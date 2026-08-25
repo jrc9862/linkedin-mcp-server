@@ -651,7 +651,7 @@ class TestBuildReferences:
                 [
                     {
                         "href": "https://www.linkedin.com/search/results/people/"
-                        f"?{facet}=%5B%22ACoAAB1234%22%5D",
+                        f"?{facet}=%5B%22ACoAAB1234%22%5D&network=%5B%22F%22%5D",
                         "text": "3 mutual connections",
                     }
                 ],
@@ -666,7 +666,7 @@ class TestBuildReferences:
             [
                 {
                     "href": "https://www.linkedin.com/search/results/people/"
-                    "?connectionOf=%5B%22ACoAAB1234%22%5D",
+                    "?connectionOf=%5B%22ACoAAB1234%22%5D&network=%5B%22F%22%5D",
                     "text": "",
                 }
             ],
@@ -675,6 +675,44 @@ class TestBuildReferences:
 
         assert references[0]["kind"] == "mutual_connections"
         assert references[0]["value"] == "ACoAAB1234"
+
+    def test_a_persons_own_connection_list_is_not_shared_connections(self):
+        """MEMBER_PROFILE_CANNED_SEARCH carries connectionOf but means their list.
+
+        Observed live on a 1st-degree profile. network=["F","S"] rather than
+        ["F"], so the results are that person's contacts, not the ones we share
+        -- and they look entirely plausible, which is what makes it dangerous.
+        """
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?origin=MEMBER_PROFILE_CANNED_SEARCH"
+                    "&connectionOf=%5B%22ACoAAB1234%22%5D"
+                    "&network=%5B%22F%22%2C%22S%22%5D",
+                    "text": "500+ connections",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == []
+
+    def test_shared_followers_are_not_shared_connections(self):
+        """SHARED_FOLLOWERS_CANNED_SEARCH is a different relation."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/search/results/people/"
+                    "?origin=SHARED_FOLLOWERS_CANNED_SEARCH"
+                    "&followerOf=%5B%22ACoAAB1234%22%5D",
+                    "text": "4K followers",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == []
 
     def test_people_search_without_a_member_id_is_still_dropped(self):
         """Only person-filtered searches are rescued; generic ones stay chrome."""

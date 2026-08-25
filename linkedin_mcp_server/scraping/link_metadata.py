@@ -144,6 +144,10 @@ _FIRST_URN_RE = re.compile(r'\[\s*"?(\d+)"?')
 # a value because the facet is read positionally rather than by name -- see
 # ``_first_member_urn_from_query``.
 _MEMBER_URN_RE = re.compile(r"(ACoAA[A-Za-z0-9_-]+)")
+# Only a search scoped to *my* first-degree network is a shared-connections list.
+# ["F","S"] is the profile's own connection list, which is a different thing
+# wearing the same connectionOf facet -- see _shared_connections_urn_from_query.
+_NETWORK_FIRST_ONLY_RE = re.compile(r'^\[\s*"?F"?\s*\]$')
 
 
 def _first_company_urn_from_query(query: str) -> str | None:
@@ -161,17 +165,33 @@ def _first_company_urn_from_query(query: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _first_member_urn_from_query(query: str) -> str | None:
-    """Pull the first member id out of a people-search facet, by shape not name.
+def _shared_connections_urn_from_query(query: str) -> str | None:
+    """Pull the member id out of a *shared-connections* people-search facet.
 
-    A "N mutual connections" anchor points at a people search filtered to one
-    person, e.g. ``connectionOf=["ACoAA..."]``. LinkedIn has shipped more than
-    one spelling of that facet over time (``connectionOf``,
-    ``facetConnectionOf``), and the exact one in play varies by surface, so
-    every value is scanned for the member-id shape instead of trusting a
-    parameter name. Company facets are numeric and cannot match.
+    Carrying a member id is necessary but not sufficient. Three real anchors
+    observed on LinkedIn all carry one, and only the first is a list of people
+    we both know:
+
+    - ``origin=SHARED_CONNECTIONS_CANNED_SEARCH&network=["F"]&connectionOf=[id]``
+      -- the shared connections. What we want.
+    - ``origin=MEMBER_PROFILE_CANNED_SEARCH&network=["F","S"]&connectionOf=[id]``
+      -- that person's *own* connection list. Same facet, different meaning, and
+      the results look plausible enough to pass review unnoticed.
+    - ``origin=SHARED_FOLLOWERS_CANNED_SEARCH&followerOf=[id]`` -- followers, a
+      different relation entirely.
+
+    The discriminator is the network scope: only ``["F"]`` means "restricted to
+    my own first-degree connections", which is what makes the result *shared*.
+    The facet name is still not trusted -- LinkedIn has shipped more than one
+    spelling -- beyond skipping follower facets outright.
     """
-    for values in parse_qs(query).values():
+    params = parse_qs(query)
+    network = (params.get("network") or [""])[0].strip()
+    if not _NETWORK_FIRST_ONLY_RE.match(network):
+        return None
+    for name, values in params.items():
+        if "follower" in name.lower():
+            continue
         for value in values:
             if match := _MEMBER_URN_RE.search(value):
                 return match.group(1)
@@ -241,7 +261,7 @@ def normalize_reference(
         if urn_id:
             reference["value"] = urn_id
     elif kind == "mutual_connections":
-        member_id = _first_member_urn_from_query(urlparse(normalized_url).query)
+        member_id = _shared_connections_urn_from_query(urlparse(normalized_url).query)
         if member_id:
             reference["value"] = member_id
     if text:
@@ -307,7 +327,7 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
         # query is carried through verbatim rather than rebuilt: LinkedIn
         # supplies a working url, and reconstructing it would bake in a facet
         # spelling that is not stable across surfaces.
-        member_id = _first_member_urn_from_query(parsed.query)
+        member_id = _shared_connections_urn_from_query(parsed.query)
         if member_id:
             return ("mutual_connections", f"/search/results/people/?{parsed.query}")
 
