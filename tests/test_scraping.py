@@ -3362,8 +3362,22 @@ class TestGetMutualConnections:
             == "no_mutual_connections_link"
         )
 
-    async def test_falls_back_to_the_member_urn_when_no_anchor_exists(self, mock_page):
-        """Profile top cards render the phrase as text, so rebuild the search."""
+    async def test_no_anchor_never_synthesizes_a_search_even_with_a_urn(
+        self, mock_page
+    ):
+        """A readable member urn does not license rebuilding the search.
+
+        Regression test. The url this once synthesized,
+
+            ?origin=SHARED_CONNECTIONS_CANNED_SEARCH
+            &network=["F"]&connectionOf=[urn]
+
+        was accepted by LinkedIn, which then dropped the connectionOf facet and
+        returned network=["F"] alone -- the caller's whole 1st-degree network,
+        shaped exactly like a real answer. Verified 2026-08-31 against a profile
+        with no shared connections. The urn is readable in precisely that case,
+        so it cannot gate the fallback; only the anchor can.
+        """
         extractor = LinkedInExtractor(mock_page)
         mock_page.evaluate = AsyncMock(return_value=[])
         with (
@@ -3375,21 +3389,43 @@ class TestGetMutualConnections:
                 return_value=self.URN,
             ),
             patch.object(
+                extractor, "extract_page", new_callable=AsyncMock
+            ) as mock_extract,
+        ):
+            result = await extractor.get_mutual_connections("alinalam-")
+
+        mock_extract.assert_not_called()
+        assert result["sections"] == {}
+        assert (
+            result["section_errors"]["mutual_connections"]["error_type"]
+            == "no_mutual_connections_link"
+        )
+
+    async def test_real_anchor_is_followed_verbatim(self, mock_page):
+        """An anchor LinkedIn rendered itself is trusted and not rebuilt."""
+        anchor = (
+            "https://www.linkedin.com/search/results/people/"
+            "?origin=MEMBER_PROFILE_CANNED_SEARCH"
+            "&network=%5B%22F%22%5D"
+            "&connectionOf=%5B%22" + self.URN + "%22%5D"
+        )
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[anchor])
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                return_value=extracted("Raazi Imam"),
+                return_value=extracted("Jack Callahan"),
             ) as mock_extract,
         ):
             result = await extractor.get_mutual_connections("alinalam-")
 
         await_args = mock_extract.await_args
         assert await_args is not None
-        called_url = await_args.args[0]
-        assert "connectionOf=%5B%22" + self.URN + "%22%5D" in called_url
-        assert "origin=SHARED_CONNECTIONS_CANNED_SEARCH" in called_url
-        assert "network=%5B%22F%22%5D" in called_url
-        assert result["sections"]["mutual_connections"] == "Raazi Imam"
+        assert await_args.args[0] == anchor
+        assert result["sections"]["mutual_connections"] == "Jack Callahan"
 
     async def test_no_anchor_and_no_urn_never_runs_a_bare_search(self, mock_page):
         """Without a member id there is no filter, so there is no search."""
@@ -6436,3 +6472,143 @@ class TestEveryNormalizedEntryPoint:
                 await getattr(extractor, method)(*args, **kwargs)
         mock_extract.assert_not_called()
         mock_navigate.assert_not_called()
+
+
+class TestTrimSearchResultTail:
+    """The recommendation carousel must not be read as search results."""
+
+    def test_cuts_at_the_feedback_widget(self):
+        from linkedin_mcp_server.scraping.extractor import _trim_search_result_tail
+
+        text = (
+            "Jack Callahan \n • 1st\n\nPalantir\n\n"
+            "Are these results helpful?\n\nSuggestions for you\n\n"
+            "Linh Nguyen \n · 2nd\n\nAssociate @ ROTH\n"
+        )
+        trimmed = _trim_search_result_tail(text)
+        assert "Jack Callahan" in trimmed
+        assert "Linh Nguyen" not in trimmed
+        assert "Suggestions for you" not in trimmed
+
+    def test_leaves_untrimmed_text_alone(self):
+        from linkedin_mcp_server.scraping.extractor import _trim_search_result_tail
+
+        text = "Jack Callahan \n • 1st\n\nPalantir\n"
+        assert _trim_search_result_tail(text) == text
+
+    def test_never_returns_empty_when_a_marker_leads(self):
+        """A marker at position 0 would otherwise blank the whole section."""
+        from linkedin_mcp_server.scraping.extractor import _trim_search_result_tail
+
+        text = "Are these results helpful?\n\nJack Callahan\n"
+        assert _trim_search_result_tail(text) == text
+
+
+class TestFindWarmPathsAtCompany:
+    """The company-scoped warm-intro sweep."""
+
+    URN = "ACoAACFaEDABRfOjMxP9xZ7jbX9b0sGhUrrg7-Q"
+    ANCHOR = (
+        "https://www.linkedin.com/search/results/people/"
+        "?origin=MEMBER_PROFILE_CANNED_SEARCH&network=%5B%22F%22%5D"
+        "&connectionOf=%5B%22" + URN + "%22%5D"
+    )
+
+    async def test_rejects_a_non_numeric_company(self, mock_page):
+        """A name would be ignored by LinkedIn and return every person."""
+        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(FilterValidationError, match="numeric"):
+            await extractor.find_warm_paths_at_company("triomics")
+
+    async def test_pairs_each_person_with_their_named_mutuals(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "profile_url": "/in/sarim-khan-triomics/",
+                    "name": "Sarim Khan",
+                    "card_text": "Co-founder & CEO at Triomics",
+                    "mutual_href": self.ANCHOR,
+                    "mutual_summary": "Jack is a mutual connection",
+                }
+            ]
+        )
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[
+                    extracted("Sarim Khan"),
+                    ExtractedSection(
+                        text="Jack Callahan \n • 1st\n\nPalantir\n",
+                        references=[
+                            {
+                                "kind": "person",
+                                "url": "/in/jack-callahan-271b92158/",
+                                "text": "Jack Callahan",
+                            }
+                        ],
+                        error=None,
+                    ),
+                ],
+            ),
+            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
+        ):
+            result = await extractor.find_warm_paths_at_company("75527963")
+
+        assert "currentCompany=%5B%2275527963%22%5D" in result["url"]
+        path = result["warm_paths"][0]
+        assert path["name"] == "Sarim Khan"
+        assert path["mutual_summary"] == "Jack is a mutual connection"
+        assert path["mutuals"] == ["Jack Callahan"]
+        assert path["mutuals_url"] == self.ANCHOR
+
+    async def test_no_anchors_is_no_warm_paths_not_an_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(return_value=[])
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Some Employee"),
+        ):
+            result = await extractor.find_warm_paths_at_company("75527963")
+
+        assert result["warm_paths"] == []
+        assert "section_errors" not in result
+        assert "no warm paths" in result["note"]
+
+    async def test_max_people_bounds_the_scraping(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        cards = [
+            {
+                "profile_url": f"/in/person-{i}/",
+                "name": f"Person {i}",
+                "card_text": "",
+                "mutual_href": self.ANCHOR,
+                "mutual_summary": "X is a mutual connection",
+            }
+            for i in range(4)
+        ]
+        mock_page.evaluate = AsyncMock(return_value=cards)
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=[extracted("search")] + [extracted("Jack Callahan")] * 4,
+            ) as mock_extract,
+            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
+        ):
+            result = await extractor.find_warm_paths_at_company(
+                "75527963", max_people=2
+            )
+
+        # one search load plus exactly max_people expansions
+        assert mock_extract.await_count == 3
+        assert result["people_expanded"] == 2
+        assert result["people_with_mutuals_found"] == 4
+        assert "truncated" in result

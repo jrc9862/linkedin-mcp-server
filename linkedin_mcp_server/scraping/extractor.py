@@ -84,6 +84,35 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 # rule is that classification never depends on text values.
 _RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
+# LinkedIn appends a recommendation carousel below people-search results. On a
+# shared-connections search that module is pure noise: its cards are 2nd-degree
+# strangers, while every real result is 1st-degree by construction
+# (network=["F"]). Left in, a one-person answer reads as twenty, which is the
+# same false-warm-path failure the anchor rule guards against upstream.
+#
+# The carousel always sits after the results feedback widget, so the text is cut
+# at the first marker below. These are English-UI strings: on a localized UI no
+# marker matches and the text is returned whole, which is the safe direction --
+# noisy rather than truncated.
+_SEARCH_RESULT_TAIL_MARKERS = (
+    "Are these results helpful?",
+    "Suggestions for you",
+    "People also viewed",
+)
+
+
+def _trim_search_result_tail(text: str) -> str:
+    """Drop LinkedIn's recommendation carousel from a people-search extract."""
+    cut = min(
+        (
+            index
+            for index in (text.find(m) for m in _SEARCH_RESULT_TAIL_MARKERS)
+            if index != -1
+        ),
+        default=-1,
+    )
+    return text[:cut].rstrip() if cut > 0 else text
+
 
 def rate_limited_section_error() -> dict[str, str]:
     """The ``section_errors`` entry for a section that came back empty.
@@ -2542,17 +2571,15 @@ class LinkedInExtractor:
         Two navigations: the profile, to find the mutual-connections anchor,
         then the people search that anchor points at.
 
-        Where an anchor exists it is located by url shape rather than by its
-        label, which is localized ("Ryan is a mutual connection", "...
-        gemeinsame Kontakte"), and it is followed verbatim rather than rebuilt.
-        Profile top cards, however, render the phrase as plain text with no
-        link, so the canned search is reconstructed from the member urn the
-        profile already exposes, using the url shape LinkedIn emits on its own
-        search-result cards.
+        The anchor is located by url shape rather than by its label, which is
+        localized ("Ryan is a mutual connection", "... gemeinsame Kontakte"),
+        and it is followed verbatim, never rebuilt.
 
-        A wrong facet name does not error -- it silently returns an unfiltered
-        people search that reads exactly like a real result -- so a filter is
-        never assumed: no member urn means no search.
+        No anchor means no search. A dropped facet does not error -- it
+        silently returns an unfiltered people search that reads exactly like a
+        real result -- and a synthesized url is exactly where that happens, so
+        the anchor LinkedIn renders itself is the only accepted evidence that a
+        shared set exists. Absence of it yields an empty result, not a guess.
 
         Works for 1st-degree contacts too -- you and a direct connection still
         share connections, and LinkedIn returns them. Only your own profile has
@@ -2560,9 +2587,9 @@ class LinkedInExtractor:
 
         Returns:
             Dict with url, sections {mutual_connections: text}, references, and
-            section_errors. When neither an anchor nor a member id can be found,
-            yields an empty result plus a ``no_mutual_connections_link`` section
-            error, never a bare search.
+            section_errors. With no anchor, yields an empty result plus a
+            ``no_mutual_connections_link`` section error -- usually meaning no
+            shared connections exist -- never a bare or reconstructed search.
         """
         username = normalize_person_identifier(username)
         profile_url = person_profile_url(username, "/")
@@ -2612,27 +2639,35 @@ class LinkedInExtractor:
                 break
 
         if search_href is None:
-            # Profile top cards render "A, B and N other mutual connections" as
-            # text, not as a link -- verified on real 2nd-degree profiles, where
-            # the phrase is present and no people-search anchor exists anywhere
-            # on the page. The anchor only appears on search-result cards.
+            # No anchor: report it, never synthesize the search.
             #
-            # So fall back to the canned search LinkedIn itself emits there. The
-            # shape below was captured from a live result card rather than
-            # guessed, and the id it needs is the same member urn the profile
-            # already exposes -- confirmed identical for the same person via
-            # both routes.
-            member_urn = await self._extract_profile_urn()
-            if member_urn:
-                search_href = (
-                    "https://www.linkedin.com/search/results/people/"
-                    "?origin=SHARED_CONNECTIONS_CANNED_SEARCH"
-                    f"&network={_encode_list_facet(['F'])}"
-                    f"&connectionOf={_encode_list_facet([member_urn])}"
-                )
-                logger.info("Built shared-connections search for %s", profile_url)
-
-        if search_href is None:
+            # An earlier version rebuilt the canned search here from the member
+            # urn the profile exposes:
+            #
+            #     ?origin=SHARED_CONNECTIONS_CANNED_SEARCH
+            #     &network=["F"]&connectionOf=[member_urn]
+            #
+            # That is wrong, and wrong in the worst way. Verified 2026-08-31
+            # against two profiles at the same company whose true answers were
+            # known: one with exactly one shared connection, one with none.
+            #
+            #   - Shared connection present -> LinkedIn renders a real anchor
+            #     (origin=MEMBER_PROFILE_CANNED_SEARCH) and the branch above
+            #     follows it. Correct result: the one person, alone.
+            #   - No shared connections -> no anchor. The synthesized url was
+            #     accepted, the connectionOf facet was silently DROPPED server
+            #     side, and network=["F"] alone came back: the caller's entire
+            #     1st-degree network, ten pages of it, indistinguishable from a
+            #     real answer. Acting on it means telling someone they have a
+            #     warm introduction that does not exist.
+            #
+            # The member urn being readable proves nothing about whether the
+            # facet was honored, so it cannot gate this. The anchor is the only
+            # evidence that LinkedIn itself computed a shared-connection set,
+            # so absence of the anchor is treated as absence of the answer.
+            #
+            # This is a legitimately empty result far more often than it is a
+            # failure: most profiles simply share nobody with you.
             logger.info("No mutual-connections anchor on %s", profile_url)
             return {
                 "url": profile_url,
@@ -2641,13 +2676,22 @@ class LinkedInExtractor:
                     "mutual_connections": {
                         "error_type": "no_mutual_connections_link",
                         "message": (
-                            "Could not determine shared connections for this "
-                            "profile: no shared-connections link and no member id "
-                            "on the page. Expected on your own profile, which has "
-                            "nothing to share. Otherwise LinkedIn did not expose "
-                            "the member id here -- find the person through "
-                            "search_people instead, whose result cards carry the "
-                            "shared-connections link directly."
+                            "No shared-connections link on this profile. Most "
+                            "often this simply means you share no connections "
+                            "with this person -- LinkedIn only renders the link "
+                            "when a shared set exists. It is also expected on "
+                            "your own profile, which has nothing to share. "
+                            "Treat this as 'no warm path found', not as a "
+                            "transient error, and do not report a warm "
+                            "introduction on the strength of a retry. To "
+                            "confirm, read the profile with get_person_profile: "
+                            "a real shared connection appears on the top card "
+                            "as a '<Name> is a mutual connection' line with a "
+                            "matching mutual_connections reference; no such "
+                            "line means none exist. If you reached this person "
+                            "by name alone, find them through search_people "
+                            "instead -- its result cards carry the "
+                            "shared-connections link directly when there is one."
                         ),
                     }
                 },
@@ -2668,9 +2712,20 @@ class LinkedInExtractor:
         references: dict[str, list[Reference]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
         if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-            sections["mutual_connections"] = extracted.text
+            trimmed = _trim_search_result_tail(extracted.text)
+            sections["mutual_connections"] = trimmed
             if extracted.references:
-                references["mutual_connections"] = extracted.references
+                # References are collected across the whole page, carousel
+                # included, so drop the ones whose subject no longer appears in
+                # the trimmed text rather than handing back links to strangers.
+                kept = [
+                    reference
+                    for reference in extracted.references
+                    if not reference.get("text")
+                    or reference["text"].split(" ")[0] in trimmed
+                ]
+                if kept:
+                    references["mutual_connections"] = kept
         elif extracted.text == _RATE_LIMITED_MSG:
             section_errors["mutual_connections"] = rate_limited_section_error()
         elif extracted.error:
@@ -2679,6 +2734,180 @@ class LinkedInExtractor:
         result: dict[str, Any] = {"url": search_href, "sections": sections}
         if references:
             result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def find_warm_paths_at_company(
+        self,
+        company_urn: str,
+        keywords: str | None = None,
+        network: list[str] | None = None,
+        max_people: int = 5,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """Find who at a company you share connections with, and name them.
+
+        Answers the two-part question a warm-intro search actually has: which
+        people at this company am I one hop from, and who is the hop?
+
+        Cheap by construction. Search-result cards carry the shared-connections
+        anchor inline, so one page load pairs every person with their anchor;
+        only the people who have one are then expanded, one load each. A profile
+        visit per employee is never needed.
+
+        The anchor rule from get_mutual_connections holds here too: an anchor is
+        followed verbatim and never rebuilt, so a person with no shared set is
+        simply absent from the results rather than being attributed a
+        network-wide list. See that method for what a synthesized url does.
+
+        Args:
+            company_urn: Numeric LinkedIn company URN id. get_company_employees
+                exposes it as a ``company_urn`` reference.
+            keywords: Optional filter over the employee search ("recruiter",
+                "chief of staff").
+            network: Connection-degree filter, defaults to ``["F", "S"]``.
+                3rd-degree profiles are excluded by default because LinkedIn
+                does not render a shared-connections anchor for them.
+            max_people: Ceiling on how many people to expand. Each costs one
+                page load, so this bounds both time and scraping volume.
+            max_scrolls: Passed through to the employee search page.
+
+        Returns:
+            Dict with url, company_urn, warm_paths (name, profile_url, headline,
+            mutual_summary, mutuals_url, mutuals), counts, and section_errors.
+        """
+        if not re.fullmatch(r"[0-9]+", company_urn or ""):
+            raise FilterValidationError(
+                f"company_urn must be a numeric LinkedIn company URN id (e.g. "
+                f"'75527963'); got {company_urn!r}. Plain-text company names "
+                f"are silently ignored by LinkedIn's currentCompany facet. "
+                f"get_company_employees returns the id as a company_urn "
+                f"reference."
+            )
+        if max_people < 1:
+            raise FilterValidationError("max_people must be at least 1")
+
+        tokens = network if network is not None else ["F", "S"]
+        invalid = [t for t in tokens if t not in _NETWORK_TOKENS]
+        if invalid:
+            raise FilterValidationError(
+                f"Invalid network token(s) {invalid!r}; "
+                f"expected any of {list(_NETWORK_TOKENS)!r}"
+            )
+
+        params = f"currentCompany={_encode_list_facet([company_urn])}"
+        params += f"&network={_encode_list_facet(tokens)}"
+        if keywords:
+            params += f"&keywords={quote_plus(keywords)}"
+        search_url = f"https://www.linkedin.com/search/results/people/?{params}"
+
+        section_errors: dict[str, dict[str, Any]] = {}
+        extracted = await self.extract_page(
+            search_url, section_name="search_results", max_scrolls=max_scrolls
+        )
+        if extracted.text == _RATE_LIMITED_MSG:
+            return {
+                "url": search_url,
+                "company_urn": company_urn,
+                "warm_paths": [],
+                "section_errors": {"warm_paths": rate_limited_section_error()},
+            }
+
+        # Pair each shared-connections anchor with the person whose card holds
+        # it. The anchor is the rare element, so walking up from it to the
+        # nearest ancestor that also holds a /in/ link is more stable than
+        # guessing at LinkedIn's obfuscated card class names.
+        cards: list[dict[str, str]] = await self._page.evaluate(
+            """() => {
+                const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const out = [];
+                const seen = new Set();
+                const anchors = document.querySelectorAll(
+                    'a[href*="connectionOf"]'
+                );
+                for (const anchor of anchors) {
+                    const href = anchor.getAttribute('href') || anchor.href || '';
+                    if (!href) continue;
+                    let node = anchor;
+                    let person = null;
+                    for (let hop = 0; hop < 8 && node; hop++) {
+                        node = node.parentElement;
+                        if (!node) break;
+                        person = node.querySelector('a[href*="/in/"]');
+                        if (person) break;
+                    }
+                    if (!person) continue;
+                    const profile = person.getAttribute('href') || person.href || '';
+                    if (!profile || seen.has(profile)) continue;
+                    seen.add(profile);
+                    const card = node;
+                    out.push({
+                        profile_url: profile,
+                        name: normalize(person.innerText || ''),
+                        card_text: normalize(card.innerText || '').slice(0, 400),
+                        mutual_href: href,
+                        mutual_summary: normalize(anchor.innerText || ''),
+                    });
+                }
+                return out;
+            }"""
+        )
+
+        warm_paths: list[dict[str, Any]] = []
+        for card in cards[:max_people]:
+            mutuals_url = urljoin("https://www.linkedin.com", card["mutual_href"])
+            await asyncio.sleep(_NAV_DELAY)
+            expanded = await self.extract_page(
+                mutuals_url,
+                section_name="mutual_connections",
+                max_scrolls=max_scrolls,
+            )
+            entry: dict[str, Any] = {
+                "name": card.get("name") or "",
+                "profile_url": urljoin(
+                    "https://www.linkedin.com", card.get("profile_url", "")
+                ),
+                "headline": card.get("card_text", ""),
+                "mutual_summary": card.get("mutual_summary", ""),
+                "mutuals_url": mutuals_url,
+            }
+            if expanded.text and expanded.text != _RATE_LIMITED_MSG:
+                trimmed = _trim_search_result_tail(expanded.text)
+                entry["mutuals_text"] = trimmed
+                entry["mutuals"] = [
+                    reference["text"]
+                    for reference in (expanded.references or [])
+                    if reference.get("kind") == "person"
+                    and reference.get("text")
+                    and reference["text"].split(" ")[0] in trimmed
+                ]
+            elif expanded.text == _RATE_LIMITED_MSG:
+                entry["error"] = rate_limited_section_error()
+                warm_paths.append(entry)
+                break
+            elif expanded.error:
+                entry["error"] = expanded.error
+            warm_paths.append(entry)
+
+        result: dict[str, Any] = {
+            "url": search_url,
+            "company_urn": company_urn,
+            "warm_paths": warm_paths,
+            "people_with_mutuals_found": len(cards),
+            "people_expanded": len(warm_paths),
+        }
+        if len(cards) > max_people:
+            result["truncated"] = (
+                f"{len(cards)} people on this page have shared connections; "
+                f"expanded the first {max_people}. Raise max_people to widen."
+            )
+        if not cards and extracted.text:
+            result["note"] = (
+                "No shared-connections anchors on this results page. LinkedIn "
+                "renders one only where a shared set exists, so this reads as "
+                "no warm paths among these employees rather than a failure."
+            )
         if section_errors:
             result["section_errors"] = section_errors
         return result

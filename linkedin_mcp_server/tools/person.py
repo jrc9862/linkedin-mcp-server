@@ -333,6 +333,25 @@ def register_person_tools(
         a ``no_mutual_connections_link`` section error rather than a people
         search filtered to the wrong thing.
 
+        An empty result usually means no shared connections, not a failure.
+        LinkedIn only renders the shared-connections link when a shared set
+        exists, and that link is the only thing this tool will follow -- it
+        will not reconstruct the search from a member id. A reconstructed url
+        was tried and removed: LinkedIn accepted it, silently dropped the
+        ``connectionOf`` facet, and returned the caller's entire 1st-degree
+        network, which reads exactly like a real answer. Same class of bug as
+        the ``currentCompany`` caveat in ``search_people``.
+
+        So do not retry an empty result hoping for a list, and never report a
+        warm introduction on the strength of one. To confirm independently,
+        read the target with ``get_person_profile``: a real shared connection
+        shows on the top card as "<Name> is a mutual connection" with a
+        matching ``mutual_connections`` reference. No line means none exist.
+
+        Note the subtitle on each returned card ("X, Y & N other mutual
+        connections") describes YOUR overlap with that person, not theirs with
+        the target. It is not a check on this tool's own filtering.
+
         Costs two page loads, so prefer it for named targets over sweeping a list.
 
         Args:
@@ -372,6 +391,96 @@ def register_person_tools(
                 raise_tool_error(relogin_exc, "get_mutual_connections")
         except Exception as e:
             raise_tool_error(e, "get_mutual_connections")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Find Warm Paths At Company",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"person", "company", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def find_warm_paths_at_company(
+        company_urn: str,
+        ctx: Context,
+        keywords: str | None = None,
+        network: list[str] | None = None,
+        max_people: Annotated[int, Field(ge=1, le=25)] = 5,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """Find who at a company you share connections with, and name the shared
+        connections.
+
+        The warm-intro sweep. get_mutual_connections answers "who do we both
+        know" for one person you already picked; this finds the people worth
+        picking, across a whole employer, and answers it for each of them in the
+        same pass. Use it when targeting a company rather than an individual.
+
+        Each returned entry carries the employee (name, profile_url, headline),
+        LinkedIn's own summary line ("Jack is a mutual connection"), and
+        ``mutuals``: the people you actually share, by name. Those are who can
+        make the introduction.
+
+        Cost and volume. One page load for the employee search, then one per
+        person expanded, bounded by ``max_people`` (default 5). People without a
+        shared-connections anchor cost nothing -- they are skipped, not visited.
+        Raise ``max_people`` deliberately; every increment is another scrape
+        against your own account.
+
+        Absence is meaningful, not an error. LinkedIn renders the anchor only
+        where a shared set exists, and this follows anchors verbatim rather than
+        constructing searches. An empty ``warm_paths`` means no warm paths among
+        the employees on that results page. It never means "retry".
+
+        Args:
+            company_urn: Numeric LinkedIn company URN id (e.g. "75527963").
+                get_company_employees returns it as a ``company_urn`` reference;
+                so does get_company_profile. A company name or slug is refused,
+                because LinkedIn silently ignores non-numeric values here and
+                would return an unfiltered people search.
+            keywords: Optional filter over employees ("recruiter", "chief of
+                staff", "go to market"). Narrow first when a company is large --
+                a results page holds a limited number of cards.
+            network: Connection-degree filter, defaults to ["F", "S"]. 3rd-degree
+                profiles are excluded by default: LinkedIn renders no
+                shared-connections anchor for them, so they only crowd out the
+                page.
+            max_people: How many people to expand, 1-25, default 5.
+            max_scrolls: Scroll depth on the employee search page.
+
+        Returns:
+            Dict with url, company_urn, warm_paths, people_with_mutuals_found,
+            people_expanded, and optionally truncated/note/section_errors.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="find_warm_paths_at_company"
+            )
+            logger.info("Finding warm paths at company: %s", company_urn)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Searching employees"
+            )
+
+            result = await extractor.find_warm_paths_at_company(
+                company_urn,
+                keywords=keywords,
+                network=network,
+                max_people=max_people,
+                max_scrolls=max_scrolls,
+            )
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "find_warm_paths_at_company")
+        except Exception as e:
+            raise_tool_error(e, "find_warm_paths_at_company")  # NoReturn
 
     @mcp.tool(
         timeout=tool_timeout,
