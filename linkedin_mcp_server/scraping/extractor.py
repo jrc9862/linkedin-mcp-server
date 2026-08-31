@@ -2823,27 +2823,65 @@ class LinkedInExtractor:
         cards: list[dict[str, str]] = await self._page.evaluate(
             """() => {
                 const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
+                const slugOf = href => {
+                    const tail = (href || '').split('/in/')[1] || '';
+                    return tail.split(/[/?#]/)[0];
+                };
+
+                // Group by result card, not by profile link. A card contains
+                // more than one /in/ link: the employee, and the person named
+                // in "Gabriel Broome is a mutual connection". Iterating links
+                // treated that mutual as an employee of the company and then
+                // expanded their network. The first link in a card is the
+                // card's subject; the rest are references inside it.
+                let containers = Array.from(document.querySelectorAll('li'))
+                    .filter(li => li.querySelector('a[href*="/in/"]'))
+                    .filter(li => !li.querySelector('li a[href*="/in/"]'));
+                if (containers.length === 0) {
+                    // Fallback for layouts that do not use <li>: walk up from
+                    // each link until the block is big enough to be a card.
+                    const seenNode = new Set();
+                    containers = [];
+                    for (const link of document.querySelectorAll(
+                        'a[href*="/in/"]'
+                    )) {
+                        let node = link;
+                        for (let hop = 0; hop < 6 && node.parentElement; hop++) {
+                            node = node.parentElement;
+                            if (normalize(node.innerText || '').length > 60) break;
+                        }
+                        if (node && !seenNode.has(node)) {
+                            seenNode.add(node);
+                            containers.push(node);
+                        }
+                    }
+                }
+
                 const out = [];
                 const seen = new Set();
-                for (const link of document.querySelectorAll('a[href*="/in/"]')) {
-                    const profile = link.getAttribute('href') || link.href || '';
-                    if (!profile) continue;
-                    const slug = (profile.split('/in/')[1] || '').split(/[/?#]/)[0];
+                for (const card of containers) {
+                    const link = card.querySelector('a[href*="/in/"]');
+                    if (!link) continue;
+                    const href = link.getAttribute('href') || link.href || '';
+                    const slug = slugOf(href);
                     if (!slug || seen.has(slug)) continue;
-                    let card = link;
-                    for (let hop = 0; hop < 6 && card.parentElement; hop++) {
-                        card = card.parentElement;
-                        if (normalize(card.innerText || '').length > 60) break;
-                    }
                     const text = normalize(card.innerText || '');
                     if (!text) continue;
                     seen.add(slug);
+                    // The visible name is the first line of the link, before
+                    // LinkedIn's degree marker and the status badges it stacks
+                    // after it.
+                    let name = normalize(link.innerText || '')
+                        .split('\\u2022')[0]
+                        .split(' \\u00b7 ')[0]
+                        .trim();
+                    if (!name || name.length > 80) {
+                        name = text.split(' \\u2022 ')[0].slice(0, 80).trim();
+                    }
                     out.push({
                         slug: slug,
-                        profile_url: profile.split('?')[0],
-                        name: normalize(link.innerText || '').split(' ')[0]
-                            ? normalize(link.innerText || '')
-                            : '',
+                        profile_url: href.split('?')[0],
+                        name: name,
                         card_text: text.slice(0, 400),
                     });
                 }
