@@ -400,11 +400,12 @@ def register_person_tools(
         exclude_args=["extractor"],
     )
     async def find_warm_paths_at_company(
-        company_urn: str,
+        company_name: str,
         ctx: Context,
         keywords: str | None = None,
-        network: list[str] | None = None,
+        degrees: list[str] | None = None,
         max_people: Annotated[int, Field(ge=1, le=25)] = 5,
+        max_pages: Annotated[int, Field(ge=0, le=10)] = 3,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
         extractor: Any | None = None,
     ) -> dict[str, Any]:
@@ -413,69 +414,64 @@ def register_person_tools(
 
         The warm-intro sweep. get_mutual_connections answers "who do we both
         know" for one person you already picked; this finds the people worth
-        picking, across a whole employer, and answers it for each of them in the
-        same pass. Use it when targeting a company rather than an individual.
+        picking across a whole employer, and answers it for each in one pass.
 
-        Each returned entry carries the employee (name, profile_url, headline),
-        LinkedIn's own summary line ("Jack is a mutual connection"), and
-        ``mutuals``: the people you actually share, by name. Those are who can
-        make the introduction.
+        Each entry carries the employee (name, degree, profile_url, headline)
+        and ``mutuals``: the people you actually share, by name. Those are who
+        can make the introduction.
 
-        Cost and volume. One page load for the employee search, then one per
-        person expanded, bounded by ``max_people`` (default 5). People without a
-        shared-connections anchor cost nothing -- they are skipped, not visited.
-        Raise ``max_people`` deliberately; every increment is another scrape
-        against your own account.
+        Runs on the company's People tab, which enumerates far more of the
+        company than people-search and whose cards state the connection degree
+        outright. Its network-degree facet buttons are clicked where present, so
+        the listing is narrowed before anything is read.
 
-        Absence is meaningful, not an error. LinkedIn renders the anchor only
-        where a shared set exists, and this follows anchors verbatim rather than
-        constructing searches. An empty ``warm_paths`` means no warm paths among
-        the employees on that results page. It never means "retry".
+        Degree is the guarantee, not a text match. 2nd degree means connected
+        through someone you both know, so a 2nd-degree employee has a shared
+        connection by definition; 1st degree is someone you already know.
+        3rd+ is skipped, having no shared set to name.
 
-        How people are picked. Search cards name a shared connection in text but
-        carry no link for it, so a card mentioning "mutual" marks someone worth
-        opening and the anchor is read from their profile. The word alone also
-        catches employers like "Northwestern Mutual"; those cost one profile
-        visit, find no anchor, and are dropped rather than listed, counted under
-        ``checked_without_shared_set``. Cards carrying the full "mutual
-        connection" phrase are expanded first so ``max_people`` is never spent
-        on the ambiguous ones.
+        Cost. One page load for the tab, plus a click per extra page, plus two
+        loads per person opened (profile, then the shared-connections search),
+        bounded by max_people. Raise it deliberately -- each increment is
+        another scrape against your own account.
+
+        Absence is meaningful. A candidate whose profile carries no
+        shared-connections anchor is dropped rather than listed, since an entry
+        with no named mutual would be exactly the fabricated warm path this
+        avoids. An empty result never means "retry".
 
         Args:
-            company_urn: Numeric LinkedIn company URN id (e.g. "75527963").
-                get_company_employees returns it as a ``company_urn`` reference;
-                so does get_company_profile. A company name or slug is refused,
-                because LinkedIn silently ignores non-numeric values here and
-                would return an unfiltered people search.
+            company_name: LinkedIn company URL slug -- the segment after
+                /company/, e.g. "triomics", not the display name. Use
+                search_companies if unsure.
             keywords: Optional filter over employees ("recruiter", "chief of
-                staff", "go to market"). Narrow first when a company is large --
-                a results page holds a limited number of cards.
-            network: Connection-degree filter, defaults to ["F", "S"]. 3rd-degree
-                profiles are excluded by default: LinkedIn renders no
-                shared-connections anchor for them, so they only crowd out the
-                page.
-            max_people: How many people to expand, 1-25, default 5.
-            max_scrolls: Scroll depth on the employee search page.
+                staff", "go to market").
+            degrees: Which degrees count, default ["1st", "2nd"].
+            max_people: How many profiles to open, 1-25, default 5.
+            max_pages: "Show more results" clicks while enumerating, default 3.
+            max_scrolls: Scroll depth on the initial load.
 
         Returns:
-            Dict with url, company_urn, warm_paths, people_with_mutuals_found,
-            people_expanded, and optionally truncated/note/section_errors.
+            Dict with url, warm_paths, people_on_page, candidates_in_degree,
+            people_expanded, and optionally degree_facets_clicked, truncated,
+            checked_without_shared_set, note.
         """
         try:
             extractor = extractor or await get_ready_extractor(
                 ctx, tool_name="find_warm_paths_at_company"
             )
-            logger.info("Finding warm paths at company: %s", company_urn)
+            logger.info("Finding warm paths at company: %s", company_name)
 
             await ctx.report_progress(
-                progress=0, total=100, message="Searching employees"
+                progress=0, total=100, message="Enumerating employees"
             )
 
             result = await extractor.find_warm_paths_at_company(
-                company_urn,
+                company_name,
                 keywords=keywords,
-                network=network,
+                degrees=degrees,
                 max_people=max_people,
+                max_pages=max_pages,
                 max_scrolls=max_scrolls,
             )
 

@@ -2740,10 +2740,11 @@ class LinkedInExtractor:
 
     async def find_warm_paths_at_company(
         self,
-        company_urn: str,
+        company_name: str,
         keywords: str | None = None,
-        network: list[str] | None = None,
+        degrees: list[str] | None = None,
         max_people: int = 5,
+        max_pages: int = 3,
         max_scrolls: int | None = None,
     ) -> dict[str, Any]:
         """Find who at a company you share connections with, and name them.
@@ -2751,75 +2752,110 @@ class LinkedInExtractor:
         Answers the two-part question a warm-intro search actually has: which
         people at this company am I one hop from, and who is the hop?
 
-        Cheap by construction. Search-result cards carry the shared-connections
-        anchor inline, so one page load pairs every person with their anchor;
-        only the people who have one are then expanded, one load each. A profile
-        visit per employee is never needed.
+        Runs on the company's People tab rather than people-search. That tab
+        enumerates far more of the company (it paginates through the full
+        employee list) and its cards state the degree and name a shared
+        connection outright, which people-search cards do not reliably do.
+        Where the tab offers network-degree facet buttons ("1st", "2nd") they
+        are clicked first, so the listing itself is narrowed to people worth
+        opening before anything is read.
 
-        The anchor rule from get_mutual_connections holds here too: an anchor is
-        followed verbatim and never rebuilt, so a person with no shared set is
-        simply absent from the results rather than being attributed a
-        network-wide list. See that method for what a synthesized url does.
+        Degree is the guarantee. 2nd degree *means* connected through someone
+        you both know, so a 2nd-degree employee has a shared connection by
+        definition; a 1st-degree employee is someone you can approach yourself.
+        Anyone 3rd+ is skipped, having no shared set to name.
+
+        The anchor rule from get_mutual_connections holds: each candidate is
+        expanded through it, so the shared connections come from the anchor
+        LinkedIn rendered on that person's profile, never a constructed search.
+        A candidate whose profile carries no anchor is dropped rather than
+        listed, because an entry with no named mutual is the fabricated warm
+        path this design exists to prevent.
 
         Args:
-            company_urn: Numeric LinkedIn company URN id. get_company_employees
-                exposes it as a ``company_urn`` reference.
-            keywords: Optional filter over the employee search ("recruiter",
-                "chief of staff").
-            network: Connection-degree filter, defaults to ``["F", "S"]``.
-                3rd-degree profiles are excluded by default because LinkedIn
-                does not render a shared-connections anchor for them.
-            max_people: Ceiling on how many people to expand. Each costs one
-                page load, so this bounds both time and scraping volume.
-            max_scrolls: Passed through to the employee search page.
+            company_name: LinkedIn company URL slug (the segment after
+                /company/), e.g. "triomics". Not the display name.
+            keywords: Optional filter over employees ("recruiter", "chief of
+                staff").
+            degrees: Which degrees count as a warm path, default ["1st", "2nd"].
+            max_people: How many profiles to open, 1-25, default 5. Each costs
+                two page loads.
+            max_pages: How many times to click "Show more results" while
+                enumerating the tab, default 3.
+            max_scrolls: Scroll depth for the initial page load.
 
         Returns:
-            Dict with url, company_urn, warm_paths (name, profile_url, headline,
-            mutual_summary, mutuals_url, mutuals), counts, and section_errors.
+            Dict with url, warm_paths, and counts.
         """
-        if not re.fullmatch(r"[0-9]+", company_urn or ""):
-            raise FilterValidationError(
-                f"company_urn must be a numeric LinkedIn company URN id (e.g. "
-                f"'75527963'); got {company_urn!r}. Plain-text company names "
-                f"are silently ignored by LinkedIn's currentCompany facet. "
-                f"get_company_employees returns the id as a company_urn "
-                f"reference."
-            )
         if max_people < 1:
             raise FilterValidationError("max_people must be at least 1")
+        wanted = [
+            d.lower() for d in (degrees if degrees is not None else ["1st", "2nd"])
+        ]
 
-        tokens = network if network is not None else ["F", "S"]
-        invalid = [t for t in tokens if t not in _NETWORK_TOKENS]
-        if invalid:
-            raise FilterValidationError(
-                f"Invalid network token(s) {invalid!r}; "
-                f"expected any of {list(_NETWORK_TOKENS)!r}"
-            )
-
-        params = f"currentCompany={_encode_list_facet([company_urn])}"
-        params += f"&network={_encode_list_facet(tokens)}"
+        company_name = normalize_company_identifier(company_name)
+        url = company_page_url(company_name, "/people/")
         if keywords:
-            params += f"&keywords={quote_plus(keywords)}"
-        search_url = f"https://www.linkedin.com/search/results/people/?{params}"
+            url += f"?keywords={quote_plus(keywords)}"
 
-        section_errors: dict[str, dict[str, Any]] = {}
-        extracted = await self.extract_page(
-            search_url, section_name="search_results", max_scrolls=max_scrolls
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+        try:
+            await self._page.wait_for_selector("main", timeout=5000)
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> on %s", url)
+        await handle_modal_close(self._page)
+
+        # Click the People tab's own network-degree facets where they exist.
+        # They are bar-graph buttons whose category label is the degree, and
+        # clicking them filters the listing server side -- narrower and cheaper
+        # than reading every card and discarding most of them. Absent on many
+        # companies, so this is best-effort and the degree is re-checked per
+        # card below regardless.
+        facets_clicked: list[str] = await self._page.evaluate(
+            """(wanted) => {
+                const clicked = [];
+                const buttons = document.querySelectorAll(
+                    'button.org-people-bar-graph-element'
+                );
+                for (const button of buttons) {
+                    const category = button.querySelector(
+                        '.org-people-bar-graph-element__category'
+                    );
+                    if (!category) continue;
+                    const label = (category.innerText || '').trim().toLowerCase();
+                    if (!wanted.includes(label)) continue;
+                    if (button.getAttribute('aria-pressed') === 'true') continue;
+                    button.click();
+                    clicked.push(label);
+                }
+                return clicked;
+            }""",
+            wanted,
         )
-        if extracted.text == _RATE_LIMITED_MSG:
-            return {
-                "url": search_url,
-                "company_urn": company_urn,
-                "warm_paths": [],
-                "section_errors": {"warm_paths": rate_limited_section_error()},
-            }
+        if facets_clicked:
+            await asyncio.sleep(_NAV_DELAY)
 
-        # Search-result cards name the shared connection in text ("Jack is a
-        # mutual connection") but carry no anchor for it -- the anchor lives on
-        # the person's own profile top card. So the card text is used only to
-        # decide who is worth opening, and the profile is where the anchor is
-        # read from. An earlier version looked for the anchor on the cards and
-        # found none, reporting no warm paths for a company that had them.
+        # Page through "Show more results" so the sweep sees the whole company
+        # rather than the first dozen employees.
+        for _ in range(max(0, max_pages)):
+            more = await self._page.evaluate(
+                """() => {
+                    const isVisible = el => !!(el && (el.offsetWidth ||
+                        el.offsetHeight || el.getClientRects().length));
+                    const button = Array.from(
+                        document.querySelectorAll('button')
+                    ).find(b => isVisible(b) &&
+                        /show more results/i.test(b.innerText || ''));
+                    if (!button) return false;
+                    button.click();
+                    return true;
+                }"""
+            )
+            if not more:
+                break
+            await asyncio.sleep(_NAV_DELAY)
+
         cards: list[dict[str, str]] = await self._page.evaluate(
             """() => {
                 const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
@@ -2827,36 +2863,13 @@ class LinkedInExtractor:
                     const tail = (href || '').split('/in/')[1] || '';
                     return tail.split(/[/?#]/)[0];
                 };
-
-                // Group by result card, not by profile link. A card contains
-                // more than one /in/ link: the employee, and the person named
-                // in "Gabriel Broome is a mutual connection". Iterating links
-                // treated that mutual as an employee of the company and then
-                // expanded their network. The first link in a card is the
-                // card's subject; the rest are references inside it.
+                // Group by card, never by link: a card holds the employee's
+                // link and, separately, the link of the person named in
+                // "<Name> is a mutual connection". Taking every link treated
+                // that mutual as an employee.
                 let containers = Array.from(document.querySelectorAll('li'))
                     .filter(li => li.querySelector('a[href*="/in/"]'))
                     .filter(li => !li.querySelector('li a[href*="/in/"]'));
-                if (containers.length === 0) {
-                    // Fallback for layouts that do not use <li>: walk up from
-                    // each link until the block is big enough to be a card.
-                    const seenNode = new Set();
-                    containers = [];
-                    for (const link of document.querySelectorAll(
-                        'a[href*="/in/"]'
-                    )) {
-                        let node = link;
-                        for (let hop = 0; hop < 6 && node.parentElement; hop++) {
-                            node = node.parentElement;
-                            if (normalize(node.innerText || '').length > 60) break;
-                        }
-                        if (node && !seenNode.has(node)) {
-                            seenNode.add(node);
-                            containers.push(node);
-                        }
-                    }
-                }
-
                 const out = [];
                 const seen = new Set();
                 for (const card of containers) {
@@ -2868,65 +2881,49 @@ class LinkedInExtractor:
                     const text = normalize(card.innerText || '');
                     if (!text) continue;
                     seen.add(slug);
-                    // The visible name is the first line of the link, before
-                    // LinkedIn's degree marker and the status badges it stacks
-                    // after it.
-                    let name = normalize(link.innerText || '')
-                        .split('\\u2022')[0]
-                        .split(' \\u00b7 ')[0]
-                        .trim();
-                    if (!name || name.length > 80) {
-                        name = text.split(' \\u2022 ')[0].slice(0, 80).trim();
-                    }
+                    // "· 1st", "· 2nd", "· 3rd" -- the card states the degree.
+                    const degree = (text.match(/\\b(1st|2nd|3rd)\\b/) || [])[1] || '';
                     out.push({
                         slug: slug,
                         profile_url: href.split('?')[0],
-                        name: name,
-                        card_text: text.slice(0, 400),
+                        name: normalize(link.innerText || '').split(' \\u00b7 ')[0],
+                        degree: degree,
+                        card_text: text.slice(0, 300),
                     });
                 }
                 return out;
             }"""
         )
 
-        # Match on the bare word "mutual" rather than the full "mutual
-        # connection" phrase: LinkedIn words the card several ways ("X is a
-        # mutual connection", "X, Y & 3 other mutual connections", "12 mutual
-        # connections") and the short form catches all of them plus wordings not
-        # seen yet.
-        #
-        # It also catches headlines that merely contain the word -- "Northwestern
-        # Mutual", "mutual fund". That is deliberate and cheap: a false positive
-        # costs one profile visit and then finds no anchor, and the no-anchor
-        # entries are dropped below rather than reported. A false positive can
-        # never become a fabricated warm path, only a wasted load.
-        #
-        # Cards carrying the full phrase are ordered first so that when
-        # max_people truncates, the certain matches are the ones expanded and a
-        # company full of "... Mutual" employers cannot crowd them out. sorted()
-        # is stable, so LinkedIn's own ranking survives within each group.
-        candidates = sorted(
-            (
-                card
-                for card in cards
-                if "mutual" in (card.get("card_text") or "").lower()
-            ),
-            key=lambda card: (
-                "mutual connection" not in (card.get("card_text") or "").lower()
-            ),
+        # Degree does the filtering. A card with no readable degree is kept
+        # only if it names a mutual outright, so a layout change costs recall
+        # rather than correctness.
+        candidates = [
+            card
+            for card in cards
+            if card.get("degree", "").lower() in wanted
+            or (
+                not card.get("degree")
+                and "mutual" in (card.get("card_text") or "").lower()
+            )
+        ]
+        # Cards that already name a shared connection are the surest hits, so
+        # they are expanded first when max_people truncates. Stable sort keeps
+        # LinkedIn's ordering within each group.
+        candidates.sort(
+            key=lambda card: "mutual" not in (card.get("card_text") or "").lower()
         )
 
         warm_paths: list[dict[str, Any]] = []
         no_shared_set = 0
         for card in candidates[:max_people]:
             await asyncio.sleep(_NAV_DELAY)
-            # Reuse the single-person path: it navigates to the profile, finds
-            # the anchor LinkedIn rendered there, and follows it verbatim.
             expanded = await self.get_mutual_connections(
                 card["slug"], max_scrolls=max_scrolls
             )
             entry: dict[str, Any] = {
                 "name": card.get("name") or card["slug"],
+                "degree": card.get("degree", ""),
                 "profile_url": urljoin(
                     "https://www.linkedin.com", card.get("profile_url", "")
                 ),
@@ -2935,7 +2932,6 @@ class LinkedInExtractor:
             }
             text = (expanded.get("sections") or {}).get("mutual_connections", "")
             if text:
-                entry["mutuals_text"] = text
                 entry["mutuals"] = [
                     reference["text"]
                     for reference in (expanded.get("references") or {}).get(
@@ -2947,11 +2943,6 @@ class LinkedInExtractor:
                 ]
             errors = expanded.get("section_errors") or {}
             if errors.get("mutual_connections"):
-                # No anchor on the profile means no shared set -- the card word
-                # was a false positive ("Northwestern Mutual"). Count it and move
-                # on; listing it would be the fabricated warm path this whole
-                # design exists to avoid. A rate limit is a real error and is
-                # surfaced.
                 if (
                     errors["mutual_connections"].get("error_type")
                     == "no_mutual_connections_link"
@@ -2962,34 +2953,30 @@ class LinkedInExtractor:
             warm_paths.append(entry)
 
         result: dict[str, Any] = {
-            "url": search_url,
-            "company_urn": company_urn,
+            "url": url,
             "warm_paths": warm_paths,
-            "people_with_mutuals_found": len(warm_paths),
-            "candidates_checked": len(candidates),
             "people_on_page": len(cards),
+            "candidates_in_degree": len(candidates),
             "people_expanded": len(warm_paths),
         }
-        if len(candidates) > max_people:
-            result["truncated"] = (
-                f"{len(candidates)} people on this page have shared connections; "
-                f"expanded the first {max_people}. Raise max_people to widen."
-            )
+        if facets_clicked:
+            result["degree_facets_clicked"] = facets_clicked
         if no_shared_set:
             result["checked_without_shared_set"] = (
-                f"{no_shared_set} card(s) matched on the word 'mutual' but the "
-                f"profile carried no shared-connections anchor, so they are not "
-                f"listed. Usually an employer name ('Northwestern Mutual')."
+                f"{no_shared_set} profile(s) were opened but carried no "
+                f"shared-connections anchor, so they are not listed."
             )
-        if not candidates and extracted.text:
+        if len(candidates) > max_people:
+            result["truncated"] = (
+                f"{len(candidates)} employees are within {'/'.join(wanted)}; "
+                f"opened the first {max_people}. Raise max_people to widen."
+            )
+        if not candidates and cards:
             result["note"] = (
-                f"None of the {len(cards)} employees on this results page show a "
-                "shared connection. LinkedIn names one on the card only where a "
-                "shared set exists, so this reads as no warm paths among them "
-                "rather than a failure."
+                f"None of the {len(cards)} employees enumerated are "
+                f"{'/'.join(wanted)} connections, so there is nobody within one "
+                f"hop. Raise max_pages to enumerate more of the company."
             )
-        if section_errors:
-            result["section_errors"] = section_errors
         return result
 
     async def _resolve_message_compose_href(self) -> str | None:

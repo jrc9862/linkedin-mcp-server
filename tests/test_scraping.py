@@ -6505,232 +6505,197 @@ class TestTrimSearchResultTail:
 
 
 class TestFindWarmPathsAtCompany:
-    """The company-scoped warm-intro sweep."""
+    """The company-scoped warm-intro sweep, run on the People tab."""
 
-    URN = "ACoAACFaEDABRfOjMxP9xZ7jbX9b0sGhUrrg7-Q"
     ANCHOR = (
         "https://www.linkedin.com/search/results/people/"
         "?origin=MEMBER_PROFILE_CANNED_SEARCH&network=%5B%22F%22%5D"
-        "&connectionOf=%5B%22" + URN + "%22%5D"
+        "&connectionOf=%5B%22ACoAACFaEDABRfOjMxP9xZ7jbX9b0sGhUrrg7-Q%22%5D"
     )
 
-    async def test_rejects_a_non_numeric_company(self, mock_page):
-        """A name would be ignored by LinkedIn and return every person."""
-        from linkedin_mcp_server.scraping.extractor import FilterValidationError
+    def _page(self, mock_page, cards, facets=None):
+        """evaluate() is called for facets, paging, then the cards."""
+        mock_page.evaluate = AsyncMock(side_effect=[facets or [], False, cards])
+        return mock_page
 
-        extractor = LinkedInExtractor(mock_page)
-        with pytest.raises(FilterValidationError, match="numeric"):
-            await extractor.find_warm_paths_at_company("triomics")
+    def _expanded(self, mutuals=("Jack Callahan",)):
+        return {
+            "url": self.ANCHOR,
+            "sections": {"mutual_connections": " ".join(mutuals)},
+            "references": {
+                "mutual_connections": [
+                    {"kind": "person", "url": f"/in/{m}/", "text": m} for m in mutuals
+                ]
+            },
+        }
 
-    async def test_pairs_each_person_with_their_named_mutuals(self, mock_page):
-        """Card text selects who to open; the profile supplies the anchor."""
+    async def test_expands_second_degree_and_names_the_mutuals(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        mock_page.evaluate = AsyncMock(
-            return_value=[
+        self._page(
+            mock_page,
+            [
                 {
                     "slug": "sarim-khan-triomics",
                     "profile_url": "/in/sarim-khan-triomics/",
                     "name": "Sarim Khan",
-                    "card_text": (
-                        "Sarim Khan Co-founder & CEO at Triomics "
-                        "Jack Callahan is a mutual connection"
-                    ),
-                },
-                {
-                    "slug": "sebastienrhodes",
-                    "profile_url": "/in/sebastienrhodes/",
-                    "name": "Sebastien Rhodes",
-                    "card_text": "Sebastien Rhodes Chief Business Officer | Triomics",
-                },
-            ]
+                    "degree": "2nd",
+                    "card_text": "Sarim Khan 2nd Co-founder & CEO",
+                }
+            ],
         )
         with (
-            patch.object(
-                extractor,
-                "extract_page",
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
-                return_value=extracted("search page"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
             ),
             patch.object(
                 extractor,
                 "get_mutual_connections",
                 new_callable=AsyncMock,
-                return_value={
-                    "url": self.ANCHOR,
-                    "sections": {"mutual_connections": "Jack Callahan \n • 1st\n"},
-                    "references": {
-                        "mutual_connections": [
-                            {
-                                "kind": "person",
-                                "url": "/in/jack-callahan-271b92158/",
-                                "text": "Jack Callahan",
-                            }
-                        ]
-                    },
-                },
+                return_value=self._expanded(),
             ) as mock_expand,
             patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
         ):
-            result = await extractor.find_warm_paths_at_company("75527963")
+            result = await extractor.find_warm_paths_at_company("triomics")
 
-        # Only the card naming a mutual is opened.
-        assert mock_expand.await_count == 1
-        assert mock_expand.await_args.args[0] == "sarim-khan-triomics"
-        assert result["people_on_page"] == 2
-        assert result["people_with_mutuals_found"] == 1
+        assert result["url"] == "https://www.linkedin.com/company/triomics/people/"
+        mock_expand.assert_awaited_once_with("sarim-khan-triomics", max_scrolls=None)
         path = result["warm_paths"][0]
         assert path["name"] == "Sarim Khan"
+        assert path["degree"] == "2nd"
         assert path["mutuals"] == ["Jack Callahan"]
 
-    async def test_no_mutual_lines_is_no_warm_paths_not_an_error(self, mock_page):
+    async def test_third_degree_is_never_opened(self, mock_page):
+        """3rd+ has no shared set, so opening it would only burn a load."""
         extractor = LinkedInExtractor(mock_page)
-        mock_page.evaluate = AsyncMock(
-            return_value=[
+        self._page(
+            mock_page,
+            [
                 {
-                    "slug": "someone",
-                    "profile_url": "/in/someone/",
-                    "name": "Someone",
-                    "card_text": "Someone Engineer at Triomics",
+                    "slug": "hrituraj1997",
+                    "profile_url": "/in/hrituraj1997/",
+                    "name": "Hrituraj Singh",
+                    "degree": "3rd",
+                    "card_text": "Hrituraj Singh 3rd Co-Founder and CTO",
                 }
-            ]
+            ],
         )
         with (
-            patch.object(
-                extractor,
-                "extract_page",
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
-                return_value=extracted("Some Employee"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
             ),
             patch.object(
                 extractor, "get_mutual_connections", new_callable=AsyncMock
             ) as mock_expand,
         ):
-            result = await extractor.find_warm_paths_at_company("75527963")
+            result = await extractor.find_warm_paths_at_company("triomics")
 
         mock_expand.assert_not_called()
         assert result["warm_paths"] == []
-        assert "no warm paths" in result["note"]
+        assert result["people_on_page"] == 1
+        assert "note" in result
 
-    async def test_max_people_bounds_the_scraping(self, mock_page):
+    async def test_profile_without_an_anchor_is_dropped_not_listed(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        cards = [
-            {
-                "slug": f"person-{i}",
-                "profile_url": f"/in/person-{i}/",
-                "name": f"Person {i}",
-                "card_text": f"Person {i} X is a mutual connection",
-            }
-            for i in range(4)
-        ]
-        mock_page.evaluate = AsyncMock(return_value=cards)
-        with (
-            patch.object(
-                extractor,
-                "extract_page",
-                new_callable=AsyncMock,
-                return_value=extracted("search"),
-            ),
-            patch.object(
-                extractor,
-                "get_mutual_connections",
-                new_callable=AsyncMock,
-                return_value={"url": self.ANCHOR, "sections": {}},
-            ) as mock_expand,
-            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
-        ):
-            result = await extractor.find_warm_paths_at_company(
-                "75527963", max_people=2
-            )
-
-        assert mock_expand.await_count == 2
-        assert result["people_expanded"] == 2
-        assert result["candidates_checked"] == 4
-        assert "truncated" in result
-
-    async def test_bare_mutual_word_is_checked_but_not_reported_without_an_anchor(
-        self, mock_page
-    ):
-        """'Northwestern Mutual' is a candidate, never a warm path."""
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.evaluate = AsyncMock(
-            return_value=[
+        self._page(
+            mock_page,
+            [
                 {
-                    "slug": "finance-person",
-                    "profile_url": "/in/finance-person/",
-                    "name": "Finance Person",
-                    "card_text": "Finance Person Advisor at Northwestern Mutual",
+                    "slug": "someone",
+                    "profile_url": "/in/someone/",
+                    "name": "Someone",
+                    "degree": "2nd",
+                    "card_text": "Someone 2nd Engineer",
                 }
-            ]
+            ],
         )
         with (
-            patch.object(
-                extractor,
-                "extract_page",
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
-                return_value=extracted("search"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
             ),
             patch.object(
                 extractor,
                 "get_mutual_connections",
                 new_callable=AsyncMock,
                 return_value={
-                    "url": "https://www.linkedin.com/in/finance-person/",
+                    "url": "u",
                     "sections": {},
                     "section_errors": {
                         "mutual_connections": {
                             "error_type": "no_mutual_connections_link",
-                            "message": "no link",
+                            "message": "none",
                         }
                     },
                 },
-            ) as mock_expand,
+            ),
             patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
         ):
-            result = await extractor.find_warm_paths_at_company("75527963")
+            result = await extractor.find_warm_paths_at_company("triomics")
 
-        mock_expand.assert_awaited_once()
         assert result["warm_paths"] == []
-        assert result["people_with_mutuals_found"] == 0
-        assert result["candidates_checked"] == 1
         assert "checked_without_shared_set" in result
 
-    async def test_certain_matches_are_expanded_before_bare_word_matches(
-        self, mock_page
-    ):
-        """max_people must not be spent on 'Mutual' employers."""
+    async def test_cards_naming_a_mutual_are_opened_first(self, mock_page):
+        """max_people must be spent on the surest hits."""
         extractor = LinkedInExtractor(mock_page)
-        mock_page.evaluate = AsyncMock(
-            return_value=[
+        self._page(
+            mock_page,
+            [
                 {
-                    "slug": "mutual-employer",
-                    "profile_url": "/in/mutual-employer/",
-                    "name": "Bare Word",
-                    "card_text": "Bare Word Advisor at Northwestern Mutual",
+                    "slug": "plain-2nd",
+                    "profile_url": "/in/plain-2nd/",
+                    "name": "Plain Second",
+                    "degree": "2nd",
+                    "card_text": "Plain Second 2nd Engineer",
                 },
                 {
-                    "slug": "real-path",
-                    "profile_url": "/in/real-path/",
-                    "name": "Real Path",
-                    "card_text": "Real Path CEO Jack is a mutual connection",
+                    "slug": "named",
+                    "profile_url": "/in/named/",
+                    "name": "Named Mutual",
+                    "degree": "2nd",
+                    "card_text": "Named Mutual 2nd CEO Jack is a mutual connection",
                 },
-            ]
+            ],
         )
         with (
-            patch.object(
-                extractor,
-                "extract_page",
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
                 new_callable=AsyncMock,
-                return_value=extracted("search"),
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
             ),
             patch.object(
                 extractor,
                 "get_mutual_connections",
                 new_callable=AsyncMock,
-                return_value={"url": "u", "sections": {}},
+                return_value=self._expanded(),
             ) as mock_expand,
             patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
         ):
-            await extractor.find_warm_paths_at_company("75527963", max_people=1)
+            result = await extractor.find_warm_paths_at_company(
+                "triomics", max_people=1
+            )
 
         assert mock_expand.await_count == 1
-        assert mock_expand.await_args.args[0] == "real-path"
+        assert mock_expand.await_args.args[0] == "named"
+        assert "truncated" in result

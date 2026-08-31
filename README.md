@@ -42,7 +42,7 @@ This MCP server is **free** and **open source**, supported by [**Unipile**](http
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) [#629](https://github.com/stickerdaniel/linkedin-mcp-server/issues/629) |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
 | `get_mutual_connections` | List the connections you share with a person, for finding a warm introduction path. LinkedIn exposes this for 2nd-degree profiles | working |
-| `find_warm_paths_at_company` | Sweep a company for the employees you share connections with, and name the shared connections. One search load plus one per person expanded, bounded by `max_people` | working |
+| `find_warm_paths_at_company` | Sweep a company's People tab for 1st/2nd-degree employees and name the connections you share with each. Degree does the filtering; profiles with no shared-connections anchor are dropped, not listed | working |
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
