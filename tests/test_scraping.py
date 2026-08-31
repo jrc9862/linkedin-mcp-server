@@ -6523,15 +6523,74 @@ class TestFindWarmPathsAtCompany:
             await extractor.find_warm_paths_at_company("triomics")
 
     async def test_pairs_each_person_with_their_named_mutuals(self, mock_page):
+        """Card text selects who to open; the profile supplies the anchor."""
         extractor = LinkedInExtractor(mock_page)
         mock_page.evaluate = AsyncMock(
             return_value=[
                 {
+                    "slug": "sarim-khan-triomics",
                     "profile_url": "/in/sarim-khan-triomics/",
                     "name": "Sarim Khan",
-                    "card_text": "Co-founder & CEO at Triomics",
-                    "mutual_href": self.ANCHOR,
-                    "mutual_summary": "Jack is a mutual connection",
+                    "card_text": (
+                        "Sarim Khan Co-founder & CEO at Triomics "
+                        "Jack Callahan is a mutual connection"
+                    ),
+                },
+                {
+                    "slug": "sebastienrhodes",
+                    "profile_url": "/in/sebastienrhodes/",
+                    "name": "Sebastien Rhodes",
+                    "card_text": "Sebastien Rhodes Chief Business Officer | Triomics",
+                },
+            ]
+        )
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("search page"),
+            ),
+            patch.object(
+                extractor,
+                "get_mutual_connections",
+                new_callable=AsyncMock,
+                return_value={
+                    "url": self.ANCHOR,
+                    "sections": {"mutual_connections": "Jack Callahan \n • 1st\n"},
+                    "references": {
+                        "mutual_connections": [
+                            {
+                                "kind": "person",
+                                "url": "/in/jack-callahan-271b92158/",
+                                "text": "Jack Callahan",
+                            }
+                        ]
+                    },
+                },
+            ) as mock_expand,
+            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
+        ):
+            result = await extractor.find_warm_paths_at_company("75527963")
+
+        # Only the card naming a mutual is opened.
+        assert mock_expand.await_count == 1
+        assert mock_expand.await_args.args[0] == "sarim-khan-triomics"
+        assert result["people_on_page"] == 2
+        assert result["people_with_mutuals_found"] == 1
+        path = result["warm_paths"][0]
+        assert path["name"] == "Sarim Khan"
+        assert path["mutuals"] == ["Jack Callahan"]
+
+    async def test_no_mutual_lines_is_no_warm_paths_not_an_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "slug": "someone",
+                    "profile_url": "/in/someone/",
+                    "name": "Someone",
+                    "card_text": "Someone Engineer at Triomics",
                 }
             ]
         )
@@ -6540,56 +6599,26 @@ class TestFindWarmPathsAtCompany:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                side_effect=[
-                    extracted("Sarim Khan"),
-                    ExtractedSection(
-                        text="Jack Callahan \n • 1st\n\nPalantir\n",
-                        references=[
-                            {
-                                "kind": "person",
-                                "url": "/in/jack-callahan-271b92158/",
-                                "text": "Jack Callahan",
-                            }
-                        ],
-                        error=None,
-                    ),
-                ],
+                return_value=extracted("Some Employee"),
             ),
-            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
+            patch.object(
+                extractor, "get_mutual_connections", new_callable=AsyncMock
+            ) as mock_expand,
         ):
             result = await extractor.find_warm_paths_at_company("75527963")
 
-        assert "currentCompany=%5B%2275527963%22%5D" in result["url"]
-        path = result["warm_paths"][0]
-        assert path["name"] == "Sarim Khan"
-        assert path["mutual_summary"] == "Jack is a mutual connection"
-        assert path["mutuals"] == ["Jack Callahan"]
-        assert path["mutuals_url"] == self.ANCHOR
-
-    async def test_no_anchors_is_no_warm_paths_not_an_error(self, mock_page):
-        extractor = LinkedInExtractor(mock_page)
-        mock_page.evaluate = AsyncMock(return_value=[])
-        with patch.object(
-            extractor,
-            "extract_page",
-            new_callable=AsyncMock,
-            return_value=extracted("Some Employee"),
-        ):
-            result = await extractor.find_warm_paths_at_company("75527963")
-
+        mock_expand.assert_not_called()
         assert result["warm_paths"] == []
-        assert "section_errors" not in result
         assert "no warm paths" in result["note"]
 
     async def test_max_people_bounds_the_scraping(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         cards = [
             {
+                "slug": f"person-{i}",
                 "profile_url": f"/in/person-{i}/",
                 "name": f"Person {i}",
-                "card_text": "",
-                "mutual_href": self.ANCHOR,
-                "mutual_summary": "X is a mutual connection",
+                "card_text": f"Person {i} X is a mutual connection",
             }
             for i in range(4)
         ]
@@ -6599,16 +6628,21 @@ class TestFindWarmPathsAtCompany:
                 extractor,
                 "extract_page",
                 new_callable=AsyncMock,
-                side_effect=[extracted("search")] + [extracted("Jack Callahan")] * 4,
-            ) as mock_extract,
+                return_value=extracted("search"),
+            ),
+            patch.object(
+                extractor,
+                "get_mutual_connections",
+                new_callable=AsyncMock,
+                return_value={"url": self.ANCHOR, "sections": {}},
+            ) as mock_expand,
             patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
         ):
             result = await extractor.find_warm_paths_at_company(
                 "75527963", max_people=2
             )
 
-        # one search load plus exactly max_people expansions
-        assert mock_extract.await_count == 3
+        assert mock_expand.await_count == 2
         assert result["people_expanded"] == 2
         assert result["people_with_mutuals_found"] == 4
         assert "truncated" in result

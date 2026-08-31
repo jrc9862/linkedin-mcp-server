@@ -2814,99 +2814,105 @@ class LinkedInExtractor:
                 "section_errors": {"warm_paths": rate_limited_section_error()},
             }
 
-        # Pair each shared-connections anchor with the person whose card holds
-        # it. The anchor is the rare element, so walking up from it to the
-        # nearest ancestor that also holds a /in/ link is more stable than
-        # guessing at LinkedIn's obfuscated card class names.
+        # Search-result cards name the shared connection in text ("Jack is a
+        # mutual connection") but carry no anchor for it -- the anchor lives on
+        # the person's own profile top card. So the card text is used only to
+        # decide who is worth opening, and the profile is where the anchor is
+        # read from. An earlier version looked for the anchor on the cards and
+        # found none, reporting no warm paths for a company that had them.
         cards: list[dict[str, str]] = await self._page.evaluate(
             """() => {
                 const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
                 const out = [];
                 const seen = new Set();
-                const anchors = document.querySelectorAll(
-                    'a[href*="connectionOf"]'
-                );
-                for (const anchor of anchors) {
-                    const href = anchor.getAttribute('href') || anchor.href || '';
-                    if (!href) continue;
-                    let node = anchor;
-                    let person = null;
-                    for (let hop = 0; hop < 8 && node; hop++) {
-                        node = node.parentElement;
-                        if (!node) break;
-                        person = node.querySelector('a[href*="/in/"]');
-                        if (person) break;
+                for (const link of document.querySelectorAll('a[href*="/in/"]')) {
+                    const profile = link.getAttribute('href') || link.href || '';
+                    if (!profile) continue;
+                    const slug = (profile.split('/in/')[1] || '').split(/[/?#]/)[0];
+                    if (!slug || seen.has(slug)) continue;
+                    let card = link;
+                    for (let hop = 0; hop < 6 && card.parentElement; hop++) {
+                        card = card.parentElement;
+                        if (normalize(card.innerText || '').length > 60) break;
                     }
-                    if (!person) continue;
-                    const profile = person.getAttribute('href') || person.href || '';
-                    if (!profile || seen.has(profile)) continue;
-                    seen.add(profile);
-                    const card = node;
+                    const text = normalize(card.innerText || '');
+                    if (!text) continue;
+                    seen.add(slug);
                     out.push({
-                        profile_url: profile,
-                        name: normalize(person.innerText || ''),
-                        card_text: normalize(card.innerText || '').slice(0, 400),
-                        mutual_href: href,
-                        mutual_summary: normalize(anchor.innerText || ''),
+                        slug: slug,
+                        profile_url: profile.split('?')[0],
+                        name: normalize(link.innerText || '').split(' ')[0]
+                            ? normalize(link.innerText || '')
+                            : '',
+                        card_text: text.slice(0, 400),
                     });
                 }
                 return out;
             }"""
         )
 
+        # "mutual connection(s)" is the English-UI phrase LinkedIn uses on the
+        # card. On a localized UI nothing matches and no one is opened, which is
+        # the safe direction: a missed warm path costs a search, a fabricated one
+        # costs credibility.
+        candidates = [
+            card
+            for card in cards
+            if "mutual connection" in (card.get("card_text") or "").lower()
+        ]
+
         warm_paths: list[dict[str, Any]] = []
-        for card in cards[:max_people]:
-            mutuals_url = urljoin("https://www.linkedin.com", card["mutual_href"])
+        for card in candidates[:max_people]:
             await asyncio.sleep(_NAV_DELAY)
-            expanded = await self.extract_page(
-                mutuals_url,
-                section_name="mutual_connections",
-                max_scrolls=max_scrolls,
+            # Reuse the single-person path: it navigates to the profile, finds
+            # the anchor LinkedIn rendered there, and follows it verbatim.
+            expanded = await self.get_mutual_connections(
+                card["slug"], max_scrolls=max_scrolls
             )
             entry: dict[str, Any] = {
-                "name": card.get("name") or "",
+                "name": card.get("name") or card["slug"],
                 "profile_url": urljoin(
                     "https://www.linkedin.com", card.get("profile_url", "")
                 ),
                 "headline": card.get("card_text", ""),
-                "mutual_summary": card.get("mutual_summary", ""),
-                "mutuals_url": mutuals_url,
+                "mutuals_url": expanded.get("url", ""),
             }
-            if expanded.text and expanded.text != _RATE_LIMITED_MSG:
-                trimmed = _trim_search_result_tail(expanded.text)
-                entry["mutuals_text"] = trimmed
+            text = (expanded.get("sections") or {}).get("mutual_connections", "")
+            if text:
+                entry["mutuals_text"] = text
                 entry["mutuals"] = [
                     reference["text"]
-                    for reference in (expanded.references or [])
+                    for reference in (expanded.get("references") or {}).get(
+                        "mutual_connections", []
+                    )
                     if reference.get("kind") == "person"
                     and reference.get("text")
-                    and reference["text"].split(" ")[0] in trimmed
+                    and reference["text"].split(" ")[0] in text
                 ]
-            elif expanded.text == _RATE_LIMITED_MSG:
-                entry["error"] = rate_limited_section_error()
-                warm_paths.append(entry)
-                break
-            elif expanded.error:
-                entry["error"] = expanded.error
+            errors = expanded.get("section_errors") or {}
+            if errors.get("mutual_connections"):
+                entry["error"] = errors["mutual_connections"]
             warm_paths.append(entry)
 
         result: dict[str, Any] = {
             "url": search_url,
             "company_urn": company_urn,
             "warm_paths": warm_paths,
-            "people_with_mutuals_found": len(cards),
+            "people_with_mutuals_found": len(candidates),
+            "people_on_page": len(cards),
             "people_expanded": len(warm_paths),
         }
-        if len(cards) > max_people:
+        if len(candidates) > max_people:
             result["truncated"] = (
-                f"{len(cards)} people on this page have shared connections; "
+                f"{len(candidates)} people on this page have shared connections; "
                 f"expanded the first {max_people}. Raise max_people to widen."
             )
-        if not cards and extracted.text:
+        if not candidates and extracted.text:
             result["note"] = (
-                "No shared-connections anchors on this results page. LinkedIn "
-                "renders one only where a shared set exists, so this reads as "
-                "no warm paths among these employees rather than a failure."
+                f"None of the {len(cards)} employees on this results page show a "
+                "shared connection. LinkedIn names one on the card only where a "
+                "shared set exists, so this reads as no warm paths among them "
+                "rather than a failure."
             )
         if section_errors:
             result["section_errors"] = section_errors
