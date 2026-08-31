@@ -2851,17 +2851,35 @@ class LinkedInExtractor:
             }"""
         )
 
-        # "mutual connection(s)" is the English-UI phrase LinkedIn uses on the
-        # card. On a localized UI nothing matches and no one is opened, which is
-        # the safe direction: a missed warm path costs a search, a fabricated one
-        # costs credibility.
-        candidates = [
-            card
-            for card in cards
-            if "mutual connection" in (card.get("card_text") or "").lower()
-        ]
+        # Match on the bare word "mutual" rather than the full "mutual
+        # connection" phrase: LinkedIn words the card several ways ("X is a
+        # mutual connection", "X, Y & 3 other mutual connections", "12 mutual
+        # connections") and the short form catches all of them plus wordings not
+        # seen yet.
+        #
+        # It also catches headlines that merely contain the word -- "Northwestern
+        # Mutual", "mutual fund". That is deliberate and cheap: a false positive
+        # costs one profile visit and then finds no anchor, and the no-anchor
+        # entries are dropped below rather than reported. A false positive can
+        # never become a fabricated warm path, only a wasted load.
+        #
+        # Cards carrying the full phrase are ordered first so that when
+        # max_people truncates, the certain matches are the ones expanded and a
+        # company full of "... Mutual" employers cannot crowd them out. sorted()
+        # is stable, so LinkedIn's own ranking survives within each group.
+        candidates = sorted(
+            (
+                card
+                for card in cards
+                if "mutual" in (card.get("card_text") or "").lower()
+            ),
+            key=lambda card: (
+                "mutual connection" not in (card.get("card_text") or "").lower()
+            ),
+        )
 
         warm_paths: list[dict[str, Any]] = []
+        no_shared_set = 0
         for card in candidates[:max_people]:
             await asyncio.sleep(_NAV_DELAY)
             # Reuse the single-person path: it navigates to the profile, finds
@@ -2891,6 +2909,17 @@ class LinkedInExtractor:
                 ]
             errors = expanded.get("section_errors") or {}
             if errors.get("mutual_connections"):
+                # No anchor on the profile means no shared set -- the card word
+                # was a false positive ("Northwestern Mutual"). Count it and move
+                # on; listing it would be the fabricated warm path this whole
+                # design exists to avoid. A rate limit is a real error and is
+                # surfaced.
+                if (
+                    errors["mutual_connections"].get("error_type")
+                    == "no_mutual_connections_link"
+                ):
+                    no_shared_set += 1
+                    continue
                 entry["error"] = errors["mutual_connections"]
             warm_paths.append(entry)
 
@@ -2898,7 +2927,8 @@ class LinkedInExtractor:
             "url": search_url,
             "company_urn": company_urn,
             "warm_paths": warm_paths,
-            "people_with_mutuals_found": len(candidates),
+            "people_with_mutuals_found": len(warm_paths),
+            "candidates_checked": len(candidates),
             "people_on_page": len(cards),
             "people_expanded": len(warm_paths),
         }
@@ -2906,6 +2936,12 @@ class LinkedInExtractor:
             result["truncated"] = (
                 f"{len(candidates)} people on this page have shared connections; "
                 f"expanded the first {max_people}. Raise max_people to widen."
+            )
+        if no_shared_set:
+            result["checked_without_shared_set"] = (
+                f"{no_shared_set} card(s) matched on the word 'mutual' but the "
+                f"profile carried no shared-connections anchor, so they are not "
+                f"listed. Usually an employer name ('Northwestern Mutual')."
             )
         if not candidates and extracted.text:
             result["note"] = (

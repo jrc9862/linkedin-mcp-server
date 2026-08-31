@@ -432,6 +432,15 @@ def register_person_tools(
         constructing searches. An empty ``warm_paths`` means no warm paths among
         the employees on that results page. It never means "retry".
 
+        How people are picked. Search cards name a shared connection in text but
+        carry no link for it, so a card mentioning "mutual" marks someone worth
+        opening and the anchor is read from their profile. The word alone also
+        catches employers like "Northwestern Mutual"; those cost one profile
+        visit, find no anchor, and are dropped rather than listed, counted under
+        ``checked_without_shared_set``. Cards carrying the full "mutual
+        connection" phrase are expanded first so ``max_people`` is never spent
+        on the ambiguous ones.
+
         Args:
             company_urn: Numeric LinkedIn company URN id (e.g. "75527963").
                 get_company_employees returns it as a ``company_urn`` reference;

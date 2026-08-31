@@ -6644,5 +6644,93 @@ class TestFindWarmPathsAtCompany:
 
         assert mock_expand.await_count == 2
         assert result["people_expanded"] == 2
-        assert result["people_with_mutuals_found"] == 4
+        assert result["candidates_checked"] == 4
         assert "truncated" in result
+
+    async def test_bare_mutual_word_is_checked_but_not_reported_without_an_anchor(
+        self, mock_page
+    ):
+        """'Northwestern Mutual' is a candidate, never a warm path."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "slug": "finance-person",
+                    "profile_url": "/in/finance-person/",
+                    "name": "Finance Person",
+                    "card_text": "Finance Person Advisor at Northwestern Mutual",
+                }
+            ]
+        )
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("search"),
+            ),
+            patch.object(
+                extractor,
+                "get_mutual_connections",
+                new_callable=AsyncMock,
+                return_value={
+                    "url": "https://www.linkedin.com/in/finance-person/",
+                    "sections": {},
+                    "section_errors": {
+                        "mutual_connections": {
+                            "error_type": "no_mutual_connections_link",
+                            "message": "no link",
+                        }
+                    },
+                },
+            ) as mock_expand,
+            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
+        ):
+            result = await extractor.find_warm_paths_at_company("75527963")
+
+        mock_expand.assert_awaited_once()
+        assert result["warm_paths"] == []
+        assert result["people_with_mutuals_found"] == 0
+        assert result["candidates_checked"] == 1
+        assert "checked_without_shared_set" in result
+
+    async def test_certain_matches_are_expanded_before_bare_word_matches(
+        self, mock_page
+    ):
+        """max_people must not be spent on 'Mutual' employers."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value=[
+                {
+                    "slug": "mutual-employer",
+                    "profile_url": "/in/mutual-employer/",
+                    "name": "Bare Word",
+                    "card_text": "Bare Word Advisor at Northwestern Mutual",
+                },
+                {
+                    "slug": "real-path",
+                    "profile_url": "/in/real-path/",
+                    "name": "Real Path",
+                    "card_text": "Real Path CEO Jack is a mutual connection",
+                },
+            ]
+        )
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                return_value=extracted("search"),
+            ),
+            patch.object(
+                extractor,
+                "get_mutual_connections",
+                new_callable=AsyncMock,
+                return_value={"url": "u", "sections": {}},
+            ) as mock_expand,
+            patch("linkedin_mcp_server.scraping.extractor.asyncio.sleep", AsyncMock()),
+        ):
+            await extractor.find_warm_paths_at_company("75527963", max_people=1)
+
+        assert mock_expand.await_count == 1
+        assert mock_expand.await_args.args[0] == "real-path"
