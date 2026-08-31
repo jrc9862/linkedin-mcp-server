@@ -31,7 +31,15 @@ classifiers = [
 ]
 dependencies = [
     "cryptography>=48.0.1",
-    "fastmcp>=3.4.4",
+    # Upper bound is load-bearing. FastMCP 4.0.0 removed the deprecated
+    # `exclude_args` parameter, which all 20 @mcp.tool registrations here
+    # still use, so a 4.x resolve dies on the first tool with
+    # "TypeError: FastMCP.tool() got an unexpected keyword argument
+    # 'exclude_args'" before the server can serve anything. Without the
+    # cap a fresh `uvx --from git+...` resolve silently picks 4.x and the
+    # server stops starting. Lift it only together with a migration to
+    # dependency injection via Depends().
+    "fastmcp>=3.4.4,<4",
     "inquirer>=3.4.0",
     "packaging>=26.2",
     "patchright>=1.55.0",
