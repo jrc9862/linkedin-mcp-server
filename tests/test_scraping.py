@@ -4996,14 +4996,11 @@ class TestGetInbox:
         """get_inbox returns empty sections when page has no content."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
             patch.object(
@@ -5048,14 +5045,11 @@ class TestGetInbox:
             },
         ]
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
             patch.object(
@@ -5147,14 +5141,11 @@ class TestGetConversation:
         )
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
             patch.object(
@@ -5302,14 +5293,11 @@ class TestGetConversation:
         extractor = LinkedInExtractor(mock_page)
         mock_page.wait_for_selector = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -5334,14 +5322,11 @@ class TestGetConversation:
         extractor = LinkedInExtractor(mock_page)
         mock_page.wait_for_selector = AsyncMock()
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -5464,14 +5449,11 @@ class TestResolveConversationThreadUrls:
             ]
         )
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
             patch.object(
@@ -5619,14 +5601,11 @@ class TestSearchConversations:
             },
         ]
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
             patch.object(
@@ -5666,14 +5645,11 @@ class TestSendMessage:
         """send_message with confirm_send=False returns confirmation_required status."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -5722,14 +5698,11 @@ class TestSendMessage:
         """send_message returns message_unavailable when no compose URL found."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -5755,14 +5728,11 @@ class TestSendMessage:
         """send_message builds compose URL from profile_urn without Message-button lookup."""
         extractor = LinkedInExtractor(mock_page)
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -6527,7 +6497,12 @@ class TestFindWarmPathsAtCompany:
                 return facets or []
             if "show more results" in script.lower():
                 return False
-            return cards
+            return {
+                "cards": cards,
+                "strategy": "li",
+                "profile_links": len(cards),
+                "containers": len(cards),
+            }
 
         mock_page.evaluate = AsyncMock(side_effect=dispatch)
         mock_page.wait_for_function = AsyncMock()
@@ -6559,14 +6534,11 @@ class TestFindWarmPathsAtCompany:
             ],
         )
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -6601,14 +6573,11 @@ class TestFindWarmPathsAtCompany:
             ],
         )
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor, "get_mutual_connections", new_callable=AsyncMock
@@ -6636,14 +6605,11 @@ class TestFindWarmPathsAtCompany:
             ],
         )
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,
@@ -6690,14 +6656,11 @@ class TestFindWarmPathsAtCompany:
             ],
         )
         with (
-            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+            patch.object(
+                extractor,
+                "extract_page",
                 new_callable=AsyncMock,
-            ),
-            patch(
-                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
-                new_callable=AsyncMock,
+                return_value=extracted("employees"),
             ),
             patch.object(
                 extractor,

@@ -2798,36 +2798,21 @@ class LinkedInExtractor:
         if keywords:
             url += f"?keywords={quote_plus(keywords)}"
 
-        await self._navigate_to_page(url)
-        await detect_rate_limit(self._page)
-        try:
-            await self._page.wait_for_selector("main", timeout=5000)
-        except PlaywrightTimeoutError:
-            logger.debug("No <main> on %s", url)
-        await handle_modal_close(self._page)
-
-        # The People tab renders only the company header at first; the employee
-        # list hydrates afterwards. extract_page waits for this, and bypassing
-        # it to drive the facet buttons meant reading the page before any card
-        # existed -- a live run returned people_on_page: 0 for a company with 83
-        # employees. Wait for the first profile anchor, then scroll to trigger
-        # the lazy load that fills the rest of the first page.
-        try:
-            await self._page.wait_for_function(
-                """() => {
-                    const main = document.querySelector('main');
-                    return !!main &&
-                        main.querySelectorAll('a[href*="/in/"]').length > 0;
-                }""",
-                timeout=10000,
-            )
-        except PlaywrightTimeoutError:
-            logger.debug("Employee listing did not hydrate on %s", url)
-        for _ in range(3):
-            await self._page.evaluate(
-                "() => window.scrollTo(0, document.body.scrollHeight)"
-            )
-            await asyncio.sleep(1.0)
+        # Load through extract_page rather than navigating by hand. It already
+        # carries the People-tab hydration wait and the scroll behaviour, and
+        # get_company_employees proves it reads this page correctly. Two
+        # hand-rolled attempts at the same thing returned zero cards for a
+        # company with 83 employees; the page is left loaded afterwards, so the
+        # facet clicks and card parsing below run against it.
+        extracted = await self.extract_page(
+            url, section_name="employees", max_scrolls=max_scrolls
+        )
+        if extracted.text == _RATE_LIMITED_MSG:
+            return {
+                "url": url,
+                "warm_paths": [],
+                "section_errors": {"warm_paths": rate_limited_section_error()},
+            }
 
         # Click the People tab's own network-degree facets where they exist.
         # They are bar-graph buttons whose category label is the degree, and
@@ -2879,20 +2864,57 @@ class LinkedInExtractor:
                 break
             await asyncio.sleep(_NAV_DELAY)
 
-        cards: list[dict[str, str]] = await self._page.evaluate(
+        parsed: dict[str, Any] = await self._page.evaluate(
             """() => {
                 const normalize = v => (v || '').replace(/\\s+/g, ' ').trim();
                 const slugOf = href => {
                     const tail = (href || '').split('/in/')[1] || '';
                     return tail.split(/[/?#]/)[0];
                 };
+
+                const links = Array.from(
+                    document.querySelectorAll('a[href*="/in/"]')
+                );
+
                 // Group by card, never by link: a card holds the employee's
-                // link and, separately, the link of the person named in
+                // link and, separately, the link of whoever is named in
                 // "<Name> is a mutual connection". Taking every link treated
-                // that mutual as an employee.
+                // that mutual as an employee of the company.
+                //
+                // Three strategies, most specific first, because the tab's
+                // markup differs by surface and an <li> assumption alone
+                // returned nothing on a live page.
                 let containers = Array.from(document.querySelectorAll('li'))
                     .filter(li => li.querySelector('a[href*="/in/"]'))
                     .filter(li => !li.querySelector('li a[href*="/in/"]'));
+                let strategy = 'li';
+                if (containers.length === 0) {
+                    containers = Array.from(
+                        document.querySelectorAll(
+                            '.org-people-profile-card, [class*="people-profile-card"]'
+                        )
+                    ).filter(c => c.querySelector('a[href*="/in/"]'));
+                    strategy = 'profile-card';
+                }
+                if (containers.length === 0) {
+                    // Walk up from each link until the block is big enough to
+                    // be a card, then dedupe on the node itself.
+                    const seenNode = new Set();
+                    containers = [];
+                    for (const link of links) {
+                        let node = link;
+                        for (let hop = 0; hop < 6 && node.parentElement; hop++) {
+                            node = node.parentElement;
+                            if (normalize(node.innerText || '').length > 60) break;
+                        }
+                        if (node && !seenNode.has(node)) {
+                            seenNode.add(node);
+                            containers.push(node);
+                        }
+                    }
+                    strategy = 'walk-up';
+                }
+
                 const out = [];
                 const seen = new Set();
                 for (const card of containers) {
@@ -2904,8 +2926,8 @@ class LinkedInExtractor:
                     const text = normalize(card.innerText || '');
                     if (!text) continue;
                     seen.add(slug);
-                    // "· 1st", "· 2nd", "· 3rd" -- the card states the degree.
-                    const degree = (text.match(/\\b(1st|2nd|3rd)\\b/) || [])[1] || '';
+                    const degree =
+                        (text.match(/\\b(1st|2nd|3rd)\\b/) || [])[1] || '';
                     out.push({
                         slug: slug,
                         profile_url: href.split('?')[0],
@@ -2914,9 +2936,15 @@ class LinkedInExtractor:
                         card_text: text.slice(0, 300),
                     });
                 }
-                return out;
+                return {
+                    cards: out,
+                    strategy: strategy,
+                    profile_links: links.length,
+                    containers: containers.length,
+                };
             }"""
         )
+        cards: list[dict[str, str]] = parsed.get("cards", [])
 
         # Degree does the filtering. A card with no readable degree is kept
         # only if it names a mutual outright, so a layout change costs recall
@@ -2980,6 +3008,11 @@ class LinkedInExtractor:
             "warm_paths": warm_paths,
             "people_on_page": len(cards),
             "candidates_in_degree": len(candidates),
+            "dom": {
+                "grouping_strategy": parsed.get("strategy"),
+                "profile_links_seen": parsed.get("profile_links"),
+                "containers_seen": parsed.get("containers"),
+            },
             "people_expanded": len(warm_paths),
         }
         if facets_clicked:
