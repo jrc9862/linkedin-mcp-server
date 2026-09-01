@@ -2928,10 +2928,22 @@ class LinkedInExtractor:
                     seen.add(slug);
                     const degree =
                         (text.match(/\\b(1st|2nd|3rd)\\b/) || [])[1] || '';
+                    // The card opens with the display name and then LinkedIn's
+                    // degree furniture ("Sarim Khan 2nd degree connection ·
+                    // 2nd Co-founder..."). Cutting at the first degree token
+                    // leaves the name. The anchor's own innerText is often
+                    // empty on this tab, which is why an earlier version fell
+                    // through to the slug.
+                    let name = normalize(link.innerText || '')
+                        .split(' \\u00b7 ')[0]
+                        .trim();
+                    if (!name) {
+                        name = text.split(/\\b(?:1st|2nd|3rd)\\b/)[0].trim();
+                    }
                     out.push({
                         slug: slug,
                         profile_url: href.split('?')[0],
-                        name: normalize(link.innerText || '').split(' \\u00b7 ')[0],
+                        name: name || slug,
                         degree: degree,
                         card_text: text.slice(0, 300),
                     });
