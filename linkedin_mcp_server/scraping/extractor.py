@@ -2806,6 +2806,29 @@ class LinkedInExtractor:
             logger.debug("No <main> on %s", url)
         await handle_modal_close(self._page)
 
+        # The People tab renders only the company header at first; the employee
+        # list hydrates afterwards. extract_page waits for this, and bypassing
+        # it to drive the facet buttons meant reading the page before any card
+        # existed -- a live run returned people_on_page: 0 for a company with 83
+        # employees. Wait for the first profile anchor, then scroll to trigger
+        # the lazy load that fills the rest of the first page.
+        try:
+            await self._page.wait_for_function(
+                """() => {
+                    const main = document.querySelector('main');
+                    return !!main &&
+                        main.querySelectorAll('a[href*="/in/"]').length > 0;
+                }""",
+                timeout=10000,
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Employee listing did not hydrate on %s", url)
+        for _ in range(3):
+            await self._page.evaluate(
+                "() => window.scrollTo(0, document.body.scrollHeight)"
+            )
+            await asyncio.sleep(1.0)
+
         # Click the People tab's own network-degree facets where they exist.
         # They are bar-graph buttons whose category label is the degree, and
         # clicking them filters the listing server side -- narrower and cheaper

@@ -6514,8 +6514,23 @@ class TestFindWarmPathsAtCompany:
     )
 
     def _page(self, mock_page, cards, facets=None):
-        """evaluate() is called for facets, paging, then the cards."""
-        mock_page.evaluate = AsyncMock(side_effect=[facets or [], False, cards])
+        """Answer evaluate() by what the script asks for, not call order.
+
+        Order-based side_effect lists broke every time the method gained a
+        scroll or a wait, which said nothing about the behaviour under test.
+        """
+
+        async def dispatch(script, *args):
+            if "scrollTo" in script:
+                return None
+            if "org-people-bar-graph-element" in script:
+                return facets or []
+            if "show more results" in script.lower():
+                return False
+            return cards
+
+        mock_page.evaluate = AsyncMock(side_effect=dispatch)
+        mock_page.wait_for_function = AsyncMock()
         return mock_page
 
     def _expanded(self, mutuals=("Jack Callahan",)):
